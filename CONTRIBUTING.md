@@ -15,12 +15,16 @@ below exist to keep its guarantees checkable.
 macOS, Python 3.9+, Git 2.42+. There is nothing to install.
 
 ```sh
+python3 maestro.py doctor      # read-only check of your machine
 python3 -m unittest discover -s tests -v
 python3 examples/demo.py
 ```
 
-The full suite must pass on macOS before a change can be merged. On other platforms the
-confinement tests cannot run, and tasks end `blocked` by design.
+The full suite must pass on macOS before a change can be merged. CI
+(`.github/workflows/ci.yml`) runs `doctor`, the suite and the demo on GitHub-hosted
+macOS 26 arm64 runners for every pull request. CI has read-only permissions and no
+secrets, and that must stay true. On other platforms the confinement tests cannot run, and
+tasks end `blocked` by design.
 
 ## Ground rules
 

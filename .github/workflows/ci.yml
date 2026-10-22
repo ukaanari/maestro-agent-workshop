@@ -1,0 +1,58 @@
+# Offline validation on a GitHub-hosted macOS 26 arm64 runner.
+# No secrets, model credentials, network services or live agent sessions are used:
+# the suite runs deterministic fake agents under the real Seatbelt sandbox.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: macos-26 arm64 / ${{ matrix.python.name }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          # Interpreters outside the home directory; hosted tool-cache Pythons
+          # live under the runner's home and are refused by the sandbox policy.
+          - name: Xcode Python
+            path: /usr/bin/python3
+          - name: Homebrew Python
+            path: /opt/homebrew/bin/python3
+    env:
+      PY: ${{ matrix.python.path }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Host details
+        run: |
+          sw_vers
+          uname -m
+          csrutil status || true
+          "$PY" --version
+          /usr/bin/git --version
+
+      - name: Prerequisite check (maestro doctor)
+        run: '"$PY" -B maestro.py doctor'
+
+      - name: Test suite
+        run: '"$PY" -B -m unittest discover -s tests -v'
+
+      - name: End-to-end demo
+        run: '"$PY" -B examples/demo.py'

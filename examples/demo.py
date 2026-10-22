@@ -15,6 +15,9 @@ import tempfile
 
 CLI = Path(__file__).resolve().parents[1] / "maestro.py"
 OPERATOR = "Demo operator"
+# Snapshots hash content, path and mode, not time or machine, so this value is
+# the same on every host. README.md documents it; CI checks it independently.
+EXPECTED_SNAPSHOT = "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe"
 
 
 def maestro(root, *args):
@@ -47,12 +50,19 @@ def main():
     base = Path(tempfile.mkdtemp(prefix="maestro-demo-")).resolve()
     root = base / "state"
     try:
-        print("1. Success: fake implementer -> fresh fake reviewer -> verification -> approval")
-        task_id, snapshot = run_success(root, "Create a greeting", "greeting.txt", "Hello MAESTRO\n")
+        print("1. Success: synthetic implementer -> fresh synthetic reviewer -> verification -> approval")
+        task_id, snapshot = run_success(root, "Create a greeting", "greeting.txt", "Hello MAESTRO")
+        check(snapshot == EXPECTED_SNAPSHOT, "snapshot %s... matches the value documented in README.md"
+              % snapshot[:16], {"snapshot_sha256": snapshot})
         _, handoff = maestro(root, "artifact", task_id, "handoff")
         _, review = maestro(root, "artifact", task_id, "review")
-        check(handoff["snapshot"]["sha256"] == snapshot == review["snapshot_sha256"],
-              "handoff and review are bound to snapshot %s..." % snapshot[:16])
+        _, verification = maestro(root, "artifact", task_id, "verification")
+        check(handoff["source"] == "fake-codex" and handoff["snapshot"]["sha256"] == snapshot,
+              "handoff from the synthetic implementer is bound to that snapshot")
+        check(review["verdict"] == "approved" and review["snapshot_sha256"] == snapshot,
+              "the fresh synthetic reviewer approved exactly that snapshot")
+        check(verification["passed"] is True and verification["snapshot_sha256"] == snapshot,
+              "data-only verification passed for the same snapshot")
         code, _ = maestro(root, "approve", task_id, "--snapshot", "0" * 64, "--founder", OPERATOR)
         check(code == 2, "approval naming a different snapshot is refused")
         code, approved = maestro(root, "approve", task_id, "--snapshot", snapshot, "--founder", OPERATOR)
@@ -66,7 +76,7 @@ def main():
         check(code == 2 and status["status"] == "invalidated",
               "approval refused, task invalidated: %s" % error.get("error"), status)
 
-        print("3. Review rejection: the fake reviewer requests changes")
+        print("3. Review rejection: the synthetic reviewer requests changes")
         _, task = maestro(root, "create", "Rejected change", "--scenario", "review-fail")
         code, result = maestro(root, "run", task["id"])
         check(code == 2 and result["status"] == "review_failed", "task ends review_failed", result)

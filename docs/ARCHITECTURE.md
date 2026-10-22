@@ -110,3 +110,13 @@ by hand, and the remaining gaps.
 | Git setup command deadline | 10 s |
 | Cancellation poll / TERM grace | 25 ms / 150 ms, then KILL |
 | Retries | 0 |
+
+## Diagnostics (`doctor.py`)
+
+`maestro.py doctor` checks a host without changing it. It never instantiates the state
+store, so no state root is created or adopted. It reuses the production code paths:
+`Seatbelt.available()` for the self-test, `FakeAdapter("implement").run` under the real
+agent policy in a temporary root, and `Workspace.create()` for the Git check. A passing
+result therefore means the same code that runs tasks works on this host. The Git check
+runs `xcode-select -p` first, because on macOS `/usr/bin/git` opens an installer dialog
+when the Command Line Tools are missing.

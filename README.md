@@ -1,5 +1,7 @@
 # MAESTRO Agent Workshop
 
+[![CI](https://github.com/ukaanari/maestro-agent-workshop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ukaanari/maestro-agent-workshop/actions/workflows/ci.yml)
+
 **An experimental, security-focused local orchestrator for AI coding agents.**
 Repository: `maestro-agent-workshop`. In the code and docs the project is called MAESTRO.
 
@@ -58,9 +60,12 @@ they approve.
 | Working on an existing repository | **Not implemented.** Each task gets a new synthetic Git repository. |
 | Linux / Windows | **Not supported.** No isolation backend; tasks end `blocked`. |
 | Token or cost metering | **Not implemented.** No model is called. |
+| `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The full suite has 36 offline tests: 23 for orchestration and 13 for confinement. It needs
-no network, no API keys and no installed agent CLIs.
+The suite has 42 offline tests: 23 for orchestration, 13 for confinement and 6 for
+`doctor`. It needs no network, no API keys and no installed agent CLIs.
+[CI](.github/workflows/ci.yml) runs the suite, `doctor` and the demo on GitHub-hosted
+macOS 26 arm64 runners, with both the Xcode and the Homebrew Python. It uses no secrets.
 
 ## Requirements
 
@@ -70,35 +75,140 @@ no network, no API keys and no installed agent CLIs.
   installed **outside your home directory** (for example the Xcode Command Line Tools
   Python, python.org or Homebrew). Interpreters under your home directory, such as pyenv,
   conda or uv-managed Pythons, are refused by the sandbox's path policy, and tasks end
-  `blocked`. This was established by reading the code, not by testing.
-* Git 2.42 or newer (needs `git worktree add --orphan`).
+  `blocked`. `maestro.py doctor` reports this case.
+* Git 2.42 or newer at `/usr/bin/git`, from the Xcode Command Line Tools (needs
+  `git worktree add --orphan`).
 
-Tested only with macOS 26.7 (arm64, SIP enabled), the Xcode Python 3.9.6 and Apple Git 2.54.0.
-Other macOS versions, Intel Macs and other Python builds have not been verified.
+Developed and tested on macOS 26.7 (arm64, SIP enabled), with the Xcode Python 3.9.6 and
+Apple Git 2.54.0. Intel Macs and other macOS major versions have not been verified.
 
 ## Quick start
 
 ```sh
 git clone https://github.com/ukaanari/maestro-agent-workshop.git
 cd maestro-agent-workshop
-python3 -m unittest discover -s tests -v   # 36 tests, about 17 s on the test host
+python3 maestro.py doctor                  # read-only check of this machine
+python3 -m unittest discover -s tests -v   # 42 tests, about 18 s on the development host
 python3 examples/demo.py                   # end-to-end demo in a temporary directory
 ```
+
+`doctor` prints one JSON result per check (`ok`, `warn`, `fail`, `skip` or `info`), with a
+`fix` hint for each failure, and exits 2 if anything fails. It checks:
+
+* the platform;
+* where the Python interpreter lives;
+* the state root, which is inspected but never created;
+* the Seatbelt self-test;
+* a launch of the real fake worker under the real agent policy;
+* Git, by creating a synthetic unborn worktree.
+
+It installs and configures nothing. Its only writes are temporary directories, which it
+removes.
 
 The demo runs three tasks in a throwaway state directory and deletes it afterwards
 (`--keep` keeps it for inspection):
 
-1. **Success path.** The fake implementer writes a file and the fake reviewer receives the
-   hash-verified handoff. Verification passes, and approval with the exact snapshot hash
-   succeeds.
+1. **Success path.** The walkthrough below, automated, including a check of the expected
+   snapshot hash.
 2. **Tamper detection.** After a successful run the demo edits the output file. The approval
    attempt is refused and the task becomes `invalidated`.
-3. **Review rejection.** The fake reviewer requests changes, so verification never runs and
-   the task cannot be approved.
+3. **Review rejection.** The synthetic reviewer requests changes, so verification never
+   runs and the task cannot be approved.
 
-### Using the CLI directly
+## Walkthrough: one task, end to end
+
+> Every agent here is a **synthetic, deterministic stand-in**: `fake-codex` for the
+> implementer and `fake-claude-code` for the reviewer. No model is called, and no real
+> Codex or Claude Code is involved. The review is a fixture, not a semantic code review.
+
+The flow is: task creation → deterministic implementation → verified handoff → independent
+review → verification → human approval. Use a throwaway state directory:
 
 ```sh
+ROOT="$(mktemp -d)/state"
+m() { python3 maestro.py --root "$ROOT" "$@"; }
+```
+
+**1. Create the task.** It is single-attempt and fake-only.
+
+```sh
+ID=$(m create 'Create a greeting' --file greeting.txt --content 'Hello MAESTRO' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+**2. Run it.** The synthetic implementer runs inside the Seatbelt sandbox and returns an
+edit *request*. The coordinator applies the edit, hashes the whole worktree, and stores the
+handoff. A *fresh* synthetic reviewer process then receives the hash-verified handoff, and
+a data-only check verifies the file.
+
+```sh
+m run "$ID"
+```
+
+```json
+  "status": "awaiting_approval",
+  "evidence": {
+    "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+    "handoff_sha256": "…", "review_sha256": "…", "verification_sha256": "…"
+  }
+```
+
+The snapshot hash covers only file bytes, paths and modes, so you should get **exactly this
+value** on any machine. The demo and CI check it. The other hashes differ per run, because
+they include the random task ID.
+
+**3. Inspect the evidence.**
+
+```sh
+m artifact "$ID" handoff        # "source": "fake-codex", "destination": "fake-claude-code", full snapshot
+m artifact "$ID" review
+m artifact "$ID" verification
+```
+
+```json
+{
+  "handoff_sha256": "…",
+  "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+  "summary": "Independent fake review fixture; no semantic code review.",
+  "verdict": "approved"
+}
+{
+  "check": "exact-file-content-v1",
+  "fake_only": true,
+  "passed": true,
+  "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+  "task_id": "…"
+}
+```
+
+**4. Approve.** A human names the exact snapshot. Approval re-checks every stored hash and
+re-snapshots the live files first.
+
+```sh
+m approve "$ID" --snapshot 45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe --founder 'Your name'
+m status "$ID"
+```
+
+The event log in `status` ends like this (`evidence_current: true`):
+
+```
+created            Single attempt, fake-only synthetic task created
+preparing          Creating isolated unborn Git worktree
+implementing       Starting deterministic Codex stand-in
+reviewing          Implementation stopped; delivering verified snapshot to fresh reviewer
+verifying          Running fixed, data-only acceptance check
+awaiting_approval  Review and verification passed; explicit founder approval required
+approved           Founder approved locally: Your name
+```
+
+If you edit `$ROOT/tasks/$ID/worktree/greeting.txt` before step 4, approval is refused and
+the task becomes `invalidated`. Approval is only a local record: nothing is staged,
+committed or pushed. Clean up with `rm -rf "$(dirname "$ROOT")"`.
+
+## CLI reference
+
+```sh
+python3 maestro.py doctor
 python3 maestro.py create 'Create a greeting' --file greeting.txt --content 'Hello MAESTRO'
 python3 maestro.py run TASK_ID
 python3 maestro.py status TASK_ID
@@ -120,11 +230,12 @@ value is an audit label typed by the operator, not authentication.
 
 ## How it works
 
-Six small Python modules (about 1,000 lines in total):
+Seven small Python modules (about 1,200 lines in total):
 
 | Module | Responsibility |
 |---|---|
 | `maestro.py` | CLI and JSON output |
+| `doctor.py` | Read-only prerequisite checks, run through the production sandbox and Git code paths |
 | `workflow.py` | SQLite state machine, event log, single-attempt engine, evidence gates |
 | `workspace.py` | Synthetic Git worktrees, path policy, bounded full-content snapshots |
 | `execution.py` | Owned process groups, cancellation, time and output limits |

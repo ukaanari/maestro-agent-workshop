@@ -13,7 +13,8 @@ vulnerability reporting). Do not open a public issue for an undisclosed vulnerab
 Please include:
 
 * the affected file and function, or the profile rule,
-* macOS version and build, CPU architecture, Python and Git versions,
+* the output of `python3 maestro.py doctor`, or at least the macOS version and build, CPU
+  architecture, and Python and Git versions,
 * a minimal reproduction, preferably an offline test in the style of
   `tests/test_security.py` (synthetic canaries in private temporary directories, no
   personal paths, no external network).

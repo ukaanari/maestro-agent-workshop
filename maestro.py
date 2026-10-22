@@ -8,15 +8,20 @@ import sqlite3
 import sys
 
 from agents import SCENARIOS
+import doctor
 from execution import Cancelled, PolicyError
 from workflow import Engine, Store
+
+__version__ = "0.1.0-alpha"
 
 
 def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent / ".maestro")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor", help="check host prerequisites; changes nothing")
     create = sub.add_parser("create", help="create a fake-only task in a synthetic repo")
     create.add_argument("title")
     create.add_argument("--file", default="result.txt")
@@ -32,6 +37,11 @@ def main(argv=None):
         if name == "artifact":
             cmd.add_argument("kind", choices=("handoff", "review", "verification"))
     args = parser.parse_args(argv)
+    if args.command == "doctor":
+        # Before Store(): diagnosing a host must never create or adopt a state root.
+        report = dict(doctor.run_checks(args.root), version=__version__)
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+        return 0 if report["ok"] else 2
     try:
         store = Store(args.root)
         engine = Engine(store)
