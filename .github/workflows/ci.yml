@@ -55,4 +55,14 @@ jobs:
         run: '"$PY" -B -m unittest discover -s tests -v'
 
       - name: End-to-end demo
+        if: ${{ !cancelled() }}
         run: '"$PY" -B examples/demo.py'
+
+      # Read-only evidence for investigating failures: which operations the
+      # kernel sandbox denied during this job (pids stripped, counted).
+      - name: Sandbox denials (diagnostics)
+        if: ${{ failure() }}
+        run: |
+          /usr/bin/log show --last 15m --style compact --predicate 'sender == "Sandbox"' 2>/dev/null \
+            | grep -iE 'Sandbox: [^ ]*(python|touch|sleep|true)[^ ]*\([0-9]+\) deny\(' \
+            | sed -E 's/^.*Sandbox: //; s/\([0-9]+\)//g' | sort | uniq -c | sort -rn | head -80 || true

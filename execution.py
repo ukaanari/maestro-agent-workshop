@@ -36,6 +36,10 @@ def stop_group(proc):
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS answers EPERM when every remaining member is an unreaped
+            # zombie (seen on GitHub's macOS 26 runners): nothing left can act.
+            pass
         if sig == signal.SIGTERM and proc.poll() is None:
             try:
                 proc.wait(timeout=0.15)

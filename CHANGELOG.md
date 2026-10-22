@@ -18,7 +18,16 @@ run.** The Codex CLI and Claude Code adapters still always refuse.
   the Xcode and Homebrew Pythons, with read-only token permissions and no secrets.
 * A README walkthrough of a single task end to end, verified verbatim in bash and zsh.
   The demo now checks the snapshot hash, which is identical on every machine.
-* 6 tests for `doctor`, bringing the suite to 42. The original 36 are unchanged.
+* 6 tests for `doctor` and 1 cleanup regression test, bringing the suite to 43. The original 36 are unchanged.
+
+### Fixed
+
+* Process-group cleanup could abort with `PermissionError` instead of reporting a timeout.
+  On macOS, `killpg` returns EPERM when the only processes left in the group are dead
+  but not yet reaped. `stop_group` now treats that case like "nothing left to kill" and
+  still reaps the child. CI found this on its first run on GitHub's macOS 26 runners
+  (`test_timeout_stops_descendants_not_only_parent`). The regression test
+  `tests/test_process_cleanup.py` reproduces it deterministically.
 
 ### Included from the initial publication (2026-10-22)
 
