@@ -15,7 +15,10 @@ run.** The Codex CLI and Claude Code adapters still always refuse.
   with a fix hint for each failure.
 * `maestro.py --version`.
 * GitHub Actions CI on macOS 26 arm64. It runs `doctor`, the test suite and the demo with
-  the Xcode and Homebrew Pythons, with read-only token permissions and no secrets.
+  the Xcode and Homebrew Pythons, with read-only token permissions and no secrets. The
+  Xcode Python passes everything. Homebrew Python 3.15 fails the 4 fork-enabled
+  confinement tests through sandbox denials; this is documented in `P1A-SECURITY.md`,
+  and the profile was not widened.
 * A README walkthrough of a single task end to end, verified verbatim in bash and zsh.
   The demo now checks the snapshot hash, which is identical on every machine.
 * 6 tests for `doctor` and 1 cleanup regression test, bringing the suite to 43. The original 36 are unchanged.

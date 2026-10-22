@@ -131,3 +131,29 @@ Seatbelt filters only by `localhost` or `*` plus port — never by hostname. So:
    MAESTRO-owned provider home (e.g. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) containing only the
    needed token, granted read-only as single files. Verify each variable against the pinned
    CLI version before use.
+
+## Independent CI verification (2026-10-23)
+
+The first runs on a machine other than the development Mac were GitHub-hosted `macos-26`
+arm64 runners (image `macos-26-arm64` 20261013.0424, macOS 26.6.2 (25G83), **SIP
+disabled**), using `.github/workflows/ci.yml` with read-only permissions and no secrets.
+
+* **Xcode Python 3.9.6:** `doctor`, all 43 tests (including all 13 confinement tests) and
+  the demo pass. The demo reproduces the documented snapshot hash. Seatbelt enforcement
+  behaved as on the development host, even with SIP disabled.
+* **Bug found and fixed:** on the first run, `test_timeout_stops_descendants_not_only_parent`
+  failed with `PermissionError` from `os.killpg`. macOS returns EPERM when every remaining
+  group member is a zombie awaiting reaping. `execution.stop_group` now treats EPERM like
+  ESRCH. This was confirmed locally, and `tests/test_process_cleanup.py` reproduces it.
+  Before the fix, a timeout could be reported as `blocked` instead of `timed_out`; it
+  never made a task approvable.
+* **Homebrew Python 3.15.0: known incompatibility, profile not widened.** `doctor`, the
+  orchestration tests and the demo pass; the production agent policy denies fork. The 4
+  confinement tests that use `allow_fork=True` fail because spawning a child process (and
+  `os.uname()` during `import ctypes`) raises `PermissionError` inside the profile.
+  Kernel logs show denials that do not occur with Python 3.9, mostly reads of Homebrew
+  paths outside the interpreter prefix (`/opt/homebrew/lib/python3.15/site-packages`,
+  `/opt/homebrew/opt/{openssl@4,xz,zstd}`) and `sysctl-read hw.pagesize_compat`. The
+  exact operation behind each failure is not yet isolated. **No failure indicated an
+  escape**: every one was a denial. Any future grant needs its own justification and
+  test, and the mutation checks above must still catch every weakening.

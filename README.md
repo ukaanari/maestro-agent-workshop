@@ -54,7 +54,7 @@ they approve.
 | Evidence gate: changed, added, deleted or `chmod`-ed files, or tampered stored evidence, invalidate approval | **Implemented, tested** |
 | Explicit approval that must name the exact current snapshot hash | **Implemented, tested** |
 | Owned process groups, timeouts, cancellation, output limits, descendant cleanup | **Implemented, tested** |
-| Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on one macOS 26 / arm64 host** |
+| Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
 | Real Codex CLI implementer / Claude Code reviewer adapters | **Not implemented.** Both always refuse. |
 | Running a project's own test suite as verification | **Not implemented.** Verification is a fixed, data-only exact-content check. |
 | Working on an existing repository | **Not implemented.** Each task gets a new synthetic Git repository. |
@@ -62,10 +62,18 @@ they approve.
 | Token or cost metering | **Not implemented.** No model is called. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 42 offline tests: 23 for orchestration, 13 for confinement and 6 for
-`doctor`. It needs no network, no API keys and no installed agent CLIs.
-[CI](.github/workflows/ci.yml) runs the suite, `doctor` and the demo on GitHub-hosted
-macOS 26 arm64 runners, with both the Xcode and the Homebrew Python. It uses no secrets.
+The suite has 43 offline tests: 23 for orchestration, 13 for confinement, 6 for `doctor`
+and 1 cleanup regression test. It needs no network, no API keys and no installed agent
+CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
+`macos-26` arm64 runners, with no secrets. Results by interpreter:
+
+* **Xcode Python (supported configuration):** everything passes.
+* **Homebrew Python 3.15:** `doctor`, the orchestration tests and the demo pass.
+  - 4 confinement tests fail. These are the tests that let a confined process fork.
+  - The sandbox *denies* operations that Python 3.15 needs to start child processes.
+    This is over-restriction, not an escape, and the profile is deliberately not widened
+    to hide it.
+  - See [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
 
 ## Requirements
 
@@ -80,7 +88,8 @@ macOS 26 arm64 runners, with both the Xcode and the Homebrew Python. It uses no 
   `git worktree add --orphan`).
 
 Developed and tested on macOS 26.7 (arm64, SIP enabled), with the Xcode Python 3.9.6 and
-Apple Git 2.54.0. Intel Macs and other macOS major versions have not been verified.
+Apple Git 2.54.0. CI also verifies GitHub's macOS 26.6.2 arm64 runner image, where SIP is
+disabled. Intel Macs and other macOS major versions have not been verified.
 
 ## Quick start
 
@@ -88,7 +97,7 @@ Apple Git 2.54.0. Intel Macs and other macOS major versions have not been verifi
 git clone https://github.com/ukaanari/maestro-agent-workshop.git
 cd maestro-agent-workshop
 python3 maestro.py doctor                  # read-only check of this machine
-python3 -m unittest discover -s tests -v   # 42 tests, about 18 s on the development host
+python3 -m unittest discover -s tests -v   # 43 tests, about 18 s on the development host
 python3 examples/demo.py                   # end-to-end demo in a temporary directory
 ```
 
@@ -278,7 +287,9 @@ These are deliberate disclosures, not fine print.
   not a hostile same-user process racing the filesystem.
 * **Tasks are tiny.** Each task gets one target file. Snapshots allow at most 32 files and
   64 KiB in total.
-* **Only one host was tested.** Results come from a single macOS 26.7 arm64 machine.
+* **Few hosts were tested.** Results come from one macOS 26.7 arm64 development Mac and
+  GitHub's macOS 26.6.2 arm64 runner image. The full suite passes with the Xcode Python
+  only; with Homebrew Python 3.15, the fork-enabled confinement tests fail (see above).
 
 ## Roadmap
 
