@@ -151,9 +151,16 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   orchestration tests and the demo pass; the production agent policy denies fork. The 4
   confinement tests that use `allow_fork=True` fail because spawning a child process (and
   `os.uname()` during `import ctypes`) raises `PermissionError` inside the profile.
-  Kernel logs show denials that do not occur with Python 3.9, mostly reads of Homebrew
-  paths outside the interpreter prefix (`/opt/homebrew/lib/python3.15/site-packages`,
-  `/opt/homebrew/opt/{openssl@4,xz,zstd}`) and `sysctl-read hw.pagesize_compat`. The
-  exact operation behind each failure is not yet isolated. **No failure indicated an
-  escape**: every one was a denial. Any future grant needs its own justification and
+  The CI run's kernel sandbox log (diagnostics step) attributes both:
+  * **Child spawns:** `file-read-metadata /opt/homebrew/opt/python@3.15` was denied
+    exactly 4 times, once per Python child the failing tests start. On Homebrew,
+    `sys.executable` goes through the `opt/` symlink, which is outside the granted
+    interpreter prefix (`Cellar/...`). Non-Python children (`/bin/sh`, `/usr/bin/true`,
+    `sandbox-exec`) were denied `process-exec`, as the tests expect.
+  * **`os.uname()`:** `sysctl-read` of `kern.ostype`, `kern.osrelease`, `kern.version`,
+    `kern.hostname` and `hw.machine` was denied. The profile allows only
+    `kern.bootargs` and `security.mac.lockdown_mode_state`.
+  **No failure indicated an escape**: every one was a denial. A fix would mean either
+  launching children by the canonical interpreter path or granting specific metadata
+  and sysctl reads. Each grant needs its own justification and
   test, and the mutation checks above must still catch every weakening.
