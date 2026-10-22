@@ -147,7 +147,8 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   ESRCH. This was confirmed locally, and `tests/test_process_cleanup.py` reproduces it.
   Before the fix, a timeout could be reported as `blocked` instead of `timed_out`; it
   never made a task approvable.
-* **Homebrew Python 3.15.0: known incompatibility, profile not widened.** `doctor`, the
+* **Homebrew Python 3.15.0: known incompatibility, profile not widened
+  ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).** `doctor`, the
   orchestration tests and the demo pass; the production agent policy denies fork. The 4
   confinement tests that use `allow_fork=True` fail because spawning a child process (and
   `os.uname()` during `import ctypes`) raises `PermissionError` inside the profile.
@@ -164,3 +165,6 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   launching children by the canonical interpreter path or granting specific metadata
   and sysctl reads. Each grant needs its own justification and
   test, and the mutation checks above must still catch every weakening.
+  Until #7 is resolved, CI runs this interpreter as an experimental, non-blocking
+  job. It still runs the full, unmodified suite, and its failures stay visible.
+  The Xcode Python job is the required check.

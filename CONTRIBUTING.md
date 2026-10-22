@@ -22,8 +22,10 @@ python3 examples/demo.py
 
 The full suite must pass on macOS before a change can be merged. CI
 (`.github/workflows/ci.yml`) runs `doctor`, the suite and the demo on GitHub-hosted
-macOS 26 arm64 runners for every pull request. CI has read-only permissions and no
-secrets, and that must stay true. On other platforms the confinement tests cannot run, and
+macOS 26 arm64 runners for every pull request. The Xcode Python job is the required
+check. The Homebrew Python 3.15 job is experimental and non-blocking while #7 is open; do
+not let it hide new failures. CI has read-only permissions and no secrets, and that must
+stay true. On other platforms the confinement tests cannot run, and
 tasks end `blocked` by design.
 
 ## Ground rules

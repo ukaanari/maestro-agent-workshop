@@ -67,23 +67,31 @@ and 1 cleanup regression test. It needs no network, no API keys and no installed
 CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
 `macos-26` arm64 runners, with no secrets. Results by interpreter:
 
-* **Xcode Python (supported configuration):** everything passes.
-* **Homebrew Python 3.15:** `doctor`, the orchestration tests and the demo pass.
+* **Xcode Python: supported, and the required check.** Everything passes.
+* **Homebrew Python 3.15: experimental, with known failures
+  ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).** This job runs the
+  full, unmodified suite on every change, and its failures stay visible. It is
+  non-blocking until #7 is resolved.
+  - `doctor`, the orchestration tests and the demo pass.
   - 4 confinement tests fail. These are the tests that let a confined process fork.
-  - The sandbox *denies* operations that Python 3.15 needs to start child processes.
-    This is over-restriction, not an escape, and the profile is deliberately not widened
-    to hide it.
-  - See [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
+  - The sandbox *denies* operations that Python 3.15 needs to start child processes and
+    to call `os.uname()`. This is over-restriction, not an escape, and the profile is
+    deliberately not widened to hide it.
+  - **Python 3.15 is not fully compatible.** See
+    [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
 
 ## Requirements
 
 * macOS with `/usr/bin/sandbox-exec`. It is present on current macOS, though Apple marks it
   deprecated (see [Limitations](#limitations)).
-* Python 3.9 or newer. Standard library only, nothing to install. The interpreter must be
-  installed **outside your home directory** (for example the Xcode Command Line Tools
-  Python, python.org or Homebrew). Interpreters under your home directory, such as pyenv,
-  conda or uv-managed Pythons, are refused by the sandbox's path policy, and tasks end
-  `blocked`. `maestro.py doctor` reports this case.
+* Python 3.9 or newer. Standard library only, nothing to install.
+  - **Supported:** the Xcode Command Line Tools Python (`/usr/bin/python3`).
+  - **Experimental:** Homebrew Python 3.15. MAESTRO's task flow works, but the
+    fork-enabled confinement tests fail
+    ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).
+  - The interpreter must be installed **outside your home directory**. Interpreters under
+    your home directory, such as pyenv, conda or uv-managed Pythons, are refused by the
+    sandbox's path policy, and tasks end `blocked`. `maestro.py doctor` reports this case.
 * Git 2.42 or newer at `/usr/bin/git`, from the Xcode Command Line Tools (needs
   `git worktree add --orphan`).
 
@@ -289,7 +297,8 @@ These are deliberate disclosures, not fine print.
   64 KiB in total.
 * **Few hosts were tested.** Results come from one macOS 26.7 arm64 development Mac and
   GitHub's macOS 26.6.2 arm64 runner image. The full suite passes with the Xcode Python
-  only; with Homebrew Python 3.15, the fork-enabled confinement tests fail (see above).
+  only; with Homebrew Python 3.15, the fork-enabled confinement tests fail
+  ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).
 
 ## Roadmap
 

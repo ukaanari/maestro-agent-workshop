@@ -18,7 +18,9 @@ run.** The Codex CLI and Claude Code adapters still always refuse.
   the Xcode and Homebrew Pythons, with read-only token permissions and no secrets. The
   Xcode Python passes everything. Homebrew Python 3.15 fails the 4 fork-enabled
   confinement tests through sandbox denials; this is documented in `P1A-SECURITY.md`,
-  and the profile was not widened.
+  and the profile was not widened. Python 3.15 is experimental: its job is non-blocking
+  but runs the full suite, with known failures tracked in #7. The Xcode Python job is
+  the required check.
 * A README walkthrough of a single task end to end, verified verbatim in bash and zsh.
   The demo now checks the snapshot hash, which is identical on every machine.
 * 6 tests for `doctor` and 1 cleanup regression test, bringing the suite to 43. The original 36 are unchanged.

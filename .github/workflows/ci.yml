@@ -21,16 +21,21 @@ jobs:
     name: macos-26 arm64 / ${{ matrix.python.name }}
     runs-on: macos-26
     timeout-minutes: 15
+    # The experimental job still runs the full, unmodified suite and its job
+    # fails visibly; it just does not fail the workflow while its issue is open.
+    continue-on-error: ${{ matrix.python.experimental }}
     strategy:
       fail-fast: false
       matrix:
         python:
           # Interpreters outside the home directory; hosted tool-cache Pythons
           # live under the runner's home and are refused by the sandbox policy.
-          - name: Xcode Python
+          - name: Xcode Python (supported)
             path: /usr/bin/python3
-          - name: Homebrew Python
+            experimental: false
+          - name: Homebrew Python 3.15 (experimental, known failures #7)
             path: /opt/homebrew/bin/python3
+            experimental: true
     env:
       PY: ${{ matrix.python.path }}
       PYTHONDONTWRITEBYTECODE: "1"
