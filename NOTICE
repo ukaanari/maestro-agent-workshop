@@ -1,0 +1,11 @@
+MAESTRO Agent Workshop (maestro-agent-workshop)
+Copyright 2026 The MAESTRO Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes designs adapted from agent-orchestrator v0.14.3
+(https://github.com/OrchestratorInc/agent-orchestrator, commit
+6e8d6e4e04ab210ee8dcf9678e337a6ef6d60a8c), Copyright 2026 Untrivial, licensed
+under the Apache License, Version 2.0. MAESTRO is a new Python implementation;
+no upstream source code, binary or dependency is included. See UPSTREAM.md and
+LICENSES/agent-orchestrator-Apache-2.0.txt.

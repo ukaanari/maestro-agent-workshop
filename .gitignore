@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# MAESTRO runtime state (SQLite database, task worktrees, private homes).
+# It contains absolute local paths and must never be committed.
+.maestro/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
