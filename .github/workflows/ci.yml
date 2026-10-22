@@ -33,7 +33,7 @@ jobs:
           - name: Xcode Python (supported)
             path: /usr/bin/python3
             experimental: false
-          - name: Homebrew Python 3.15 (experimental, known failures #7)
+          - name: "Homebrew Python 3.15 (experimental, known failures #7)"
             path: /opt/homebrew/bin/python3
             experimental: true
     env:
