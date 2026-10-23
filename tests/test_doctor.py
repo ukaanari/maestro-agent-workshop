@@ -38,7 +38,10 @@ class DoctorTests(unittest.TestCase):
         report = json.loads(proc.stdout)
         self.assertTrue(report["ok"])
         status = self.statuses(report)
-        for name in ("python", "state_root", "sandbox", "confined_worker", "git"):
+        # doctor warns, by design, on any interpreter other than the supported one (#7).
+        supported = sys.version_info[:2] == doctor.SUPPORTED_PYTHON
+        self.assertEqual(status["python"], "ok" if supported else "warn", report)
+        for name in ("state_root", "sandbox", "confined_worker", "git"):
             self.assertEqual(status[name], "ok", report)
         self.assertEqual(status["real_agents"], "info")
         self.assertFalse(root.exists(), "doctor must never create the state root")
