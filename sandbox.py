@@ -159,8 +159,11 @@ class Seatbelt:
             raise PolicyError("at least one approved writable workspace is required")
         writable = [canonical_path(p, "writable path") for p in policy.writable]
         for path in writable:
-            if not os.path.isdir(path) or os.lstat(path).st_uid != os.getuid():
-                raise PolicyError("writable path must be a directory owned by this user: " + path)
+            info = os.lstat(path)
+            # Another account able to write here could plant or swap the agent's files.
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise PolicyError("writable path must be a directory owned by this user and "
+                                  "not group/world-writable: " + path)
             if not any(inside(path, root) and path != root for root in self.approved_roots):
                 raise PolicyError("writable path is outside approved disposable roots: " + path)
             for guarded in self.protected:

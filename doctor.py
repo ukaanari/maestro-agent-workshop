@@ -63,7 +63,7 @@ def check_python(exe=None, prefix=None, version=None):
                       "Use an interpreter installed outside your home directory "
                       "(Xcode Command Line Tools, python.org or Homebrew), not pyenv/conda/uv")
     if version[:2] != SUPPORTED_PYTHON:
-        known = " Python 3.15 has known sandbox test failures (#7)." if version[:2] >= (3, 15) else ""
+        known = " Python 3.15 has known sandbox test failures (#7)." if version[:2] == (3, 15) else ""
         return result("python", "warn", detail + "; only Python 3.9 (Xcode Command Line Tools) "
                       "is the supported, fully tested interpreter." + known,
                       "Use /usr/bin/python3 for supported results, or run the full test suite")

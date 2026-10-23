@@ -62,17 +62,24 @@ they approve.
 | Token or cost metering | **Not implemented.** No model is called. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 71 offline tests: 23 for orchestration, 13 for confinement, 6 for `doctor`,
-1 cleanup regression test and 28 regression tests for the independent audit findings
-F-01 to F-07. It needs no network, no API keys and no installed agent CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
+The suite has 80 offline tests:
+
+* 23 for orchestration and 13 for confinement;
+* 6 for `doctor` and 1 cleanup regression test;
+* 29 regression tests for the independent audit findings F-01 to F-07 and the re-review
+  follow-up;
+* 8 for the CI known-failure gate.
+
+It needs no network, no API keys and no installed agent CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
 `macos-26` arm64 runners, with no secrets. Results by interpreter:
 
 * **Xcode Python: supported, and the required check.** Everything passes.
 * **Homebrew Python 3.15: experimental, with known failures
   ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).** This job runs the
-  full suite on every change. It passes only if the failing tests are *exactly* the
-  listed known ones, so any other regression, or a known failure that starts passing,
-  turns it red. It is not a required check.
+  full suite on every change. It passes only if the failures are *exactly* the listed
+  test and subTest ids (`.github/known-failures/`), so any other regression, even
+  another subTest of the same test, or a known failure that starts passing, turns it
+  red. It is not a required check.
   - **On `main`:** `doctor`, the orchestration tests and the demo pass, and 4
     confinement tests fail. 3 of them start child processes through `sys.executable`,
     which on Homebrew is a launcher that the profile does not allowlist. The 4th, the
@@ -111,7 +118,7 @@ disabled. Intel Macs and other macOS major versions have not been verified.
 git clone https://github.com/ukaanari/maestro-agent-workshop.git
 cd maestro-agent-workshop
 python3 maestro.py doctor                  # read-only check of this machine
-python3 -m unittest discover -s tests -v   # 71 tests, about 23 s on the development host
+python3 -m unittest discover -s tests -v   # 80 tests, about 23 s on the development host
 python3 examples/demo.py                   # end-to-end demo in a temporary directory
 ```
 

@@ -27,14 +27,14 @@ jobs:
         python:
           # Interpreters outside the home directory; hosted tool-cache Pythons
           # live under the runner's home and are refused by the sandbox policy.
-          # known_failures: test ids allowed to fail (tracked in an issue). Any other
-          # failure, or a known failure that starts passing, fails the job.
+          # known_failures: file of exact test/subTest ids allowed to fail (each tracked
+          # in an issue). Any other failure, or a listed id that passes, fails the job.
           - name: Xcode Python (supported)
             path: /usr/bin/python3
             known_failures: ""
           - name: "Homebrew Python 3.15 (experimental, known failures #7)"
             path: /opt/homebrew/bin/python3
-            known_failures: test_security.ConfinementTests.test_process_isolation_env_signals_and_inspection
+            known_failures: .github/known-failures/homebrew-python-3.15.txt
     env:
       PY: ${{ matrix.python.path }}
       KNOWN_FAILURES: ${{ matrix.python.known_failures }}
@@ -51,13 +51,14 @@ jobs:
           uname -m
           csrutil status || true
           "$PY" --version
+          umask
           /usr/bin/git --version
 
       - name: Prerequisite check (maestro doctor)
         run: '"$PY" -B maestro.py doctor'
 
       - name: Test suite (full; only the listed known failures may fail)
-        run: '"$PY" -B .github/scripts/check_suite.py $KNOWN_FAILURES'
+        run: '"$PY" -B .github/scripts/check_suite.py --known-failures "$KNOWN_FAILURES"'
 
       - name: End-to-end demo
         if: ${{ !cancelled() }}

@@ -53,8 +53,9 @@ binary's location and ownership.
   directories of granted paths, plus explicit grants. Writes: approved directories only.
 * All paths are passed as SBPL parameters (`-D`), never interpolated into profile text.
 * Paths must be absolute, existing and canonical (no symlink or `..` components).
-* Writable grants must be user-owned directories **strictly inside** an approved disposable
-  root (`tasks/<id>/`). The grant root itself cannot be renamed, removed or chmod-ed.
+* Writable grants must be user-owned directories that are not group- or world-writable,
+  and must lie **strictly inside** an approved disposable root (`tasks/<id>/`). The grant
+  root itself cannot be renamed, removed or chmod-ed.
 * Protected paths (`state.sqlite3*`, `MAESTRO-P0`, `tasks/<id>/repo.git`, `executor.lock`,
   `worktree/.git`) are denied reading, writing **and execution** by a final rule. Inside a
   writable grant, a protected path may only be a **direct child** of the grant.
@@ -213,9 +214,11 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   `sysctl-read` entries for `os.uname()`, needs its own justification and
   test, and the mutation checks above must still catch every weakening.
   Until #7 is resolved, CI runs this interpreter as an experimental job, which is not a
-  required check. It runs the full suite and passes only if the failing tests are
-  *exactly* the listed known ones (`.github/scripts/check_suite.py`), so any other
-  regression is visible. The Xcode Python job is the required check.
+  required check. It runs the full suite and passes only if the failures are
+  *exactly* the ids in `.github/known-failures/homebrew-python-3.15.txt`
+  (`.github/scripts/check_suite.py`). These are exact test or subTest ids, so a known
+  subTest failure never excuses another subTest of the same test (re-review finding
+  NEW-01). The Xcode Python job is the required check.
 
 ## Independent audit remediation (2026-10-23)
 

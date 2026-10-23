@@ -143,7 +143,7 @@ class ProcessGroupTests(unittest.TestCase):
                   " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL);"
                   "open(%r,'w').write(str(p.pid))" % pidfile)
         self.assertEqual(execute([sys.executable, "-I", "-c", leader], self.dir, self.dir, timeout=5), b"")
-        pid = int(open(pidfile).read())
+        pid = int(Path(pidfile).read_text())
         deadline = time.monotonic() + 2
         while execution.process_state(pid) == "live":
             self.assertLess(time.monotonic(), deadline, "same-group straggler survived a normal exit")
@@ -252,6 +252,18 @@ class PolicyValidationTests(Fixture):
         for root in (str(loose), "/private/tmp"):
             with self.subTest(root=root), self.assertRaises(PolicyError):
                 Seatbelt([root], allowed_executables=[EXE])
+
+    def test_group_or_world_writable_workspace_is_rejected(self):
+        sandbox = Seatbelt([str(self.root)], allowed_executables=[EXE])
+        self.addCleanup(self.ws.chmod, 0o700)
+        for mode in (0o777, 0o775, 0o757, 0o722):
+            self.ws.chmod(mode)
+            with self.subTest(mode=oct(mode)), self.assertRaisesRegex(PolicyError, "group/world-writable"):
+                sandbox.validate(self.policy())
+        for mode in (0o700, 0o755, 0o750):
+            self.ws.chmod(mode)
+            with self.subTest(mode=oct(mode)):
+                sandbox.validate(self.policy())
 
     def test_symlinked_sandbox_engine_is_refused_before_anything_runs(self):
         link = self.base / "sandbox-exec"
@@ -438,6 +450,9 @@ class DoctorReliabilityTests(unittest.TestCase):
         newer = doctor.check_python(exe, "/opt/python", (3, 15, 0))
         self.assertEqual(newer["status"], "warn")
         self.assertIn("#7", newer["detail"])
+        later = doctor.check_python(exe, "/opt/python", (3, 16, 0))
+        self.assertEqual(later["status"], "warn")
+        self.assertNotIn("#7", later["detail"])  # #7 is specifically Python 3.15
 
 
 if __name__ == "__main__":

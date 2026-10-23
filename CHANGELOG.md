@@ -24,7 +24,8 @@ run.** The Codex CLI and Claude Code adapters still always refuse.
   ones (#7). The Xcode Python job is the required check.
 * A README walkthrough of a single task end to end, verified verbatim in bash and zsh.
   The demo now checks the snapshot hash, which is identical on every machine.
-* 6 tests for `doctor`, 1 cleanup regression test and 28 audit regression tests, bringing the suite to 71.
+* 6 tests for `doctor`, 1 cleanup regression test and 28 audit regression tests, bringing the suite to 71 (80 after the
+  re-review follow-up below).
   The original 36 tests keep every assertion. Three security tests now start children from the
   allowlisted binary, and the process-isolation test runs its probes independently (F-04).
 
@@ -66,6 +67,17 @@ Each fix comes with a regression test in `tests/test_audit_regressions.py`, whic
   - Approval re-checks the handoff against the task specification.
   - The self-test honours cancellation.
   - Non-numeric timeouts are rejected.
+
+### Independent re-review follow-up (of `6274e3d`)
+
+* **NEW-01, CI integrity.** The known-failure gate used to collapse subTest failures into
+  their parent test, so one known subTest failure could hide another. It now matches
+  exact test and subTest ids from `.github/known-failures/*.txt`. Focused tests in
+  `tests/test_check_suite.py` prove that known failures are accepted, and that unexpected,
+  parent-level or stale ones are rejected.
+* **NEW-02.** Writable grant directories that are group- or world-writable are rejected.
+* **NEW-03.** A test file handle is now closed. `doctor` attributes known failures to #7
+  only for Python 3.15.
 
 ### Fixed
 
