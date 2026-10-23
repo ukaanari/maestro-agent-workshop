@@ -17,7 +17,7 @@ CLI = Path(__file__).resolve().parents[1] / "maestro.py"
 OPERATOR = "Demo operator"
 # Snapshots hash content, path and mode, not time or machine, so this value is
 # the same on every host. README.md documents it; CI checks it independently.
-EXPECTED_SNAPSHOT = "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe"
+EXPECTED_SNAPSHOT = "3c992e2089caf176615f6f9c5bb03865490ff4ba7ade1bbae3259f55cb2f0ec6"
 
 
 def maestro(root, *args):

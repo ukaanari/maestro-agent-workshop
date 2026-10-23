@@ -17,7 +17,7 @@ if __name__ == "__main__":
 
 from execution import PolicyError
 from sandbox import SOURCE_DIR, ExecPolicy, python_runtime
-from workspace import canonical, digest
+from workspace import canonical, digest, snapshot_digest
 
 # The worker may read exactly these first-party files, plus list their directory
 # so the import system can find them. Never the directory subtree (.maestro/).
@@ -126,7 +126,7 @@ def worker():
         if digest(handoff) != data["handoff_sha256"]:
             raise PolicyError("corrupt handoff")
         snapshot = handoff["snapshot"]
-        if digest(snapshot["files"]) != snapshot["sha256"]:
+        if snapshot_digest(snapshot) != snapshot["sha256"]:
             raise PolicyError("corrupt snapshot")
         for f in snapshot["files"].values():
             if hashlib.sha256(f["text"].encode()).hexdigest() != f["sha256"]:

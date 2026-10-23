@@ -20,6 +20,16 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def snapshot_digest(snapshot):
+    """Hash of everything a snapshot binds: files (bytes, path, mode) and directories."""
+    return digest({"files": snapshot["files"], "dirs": snapshot["dirs"]})
+
+
+def parent_dirs(name):
+    parts = name.split("/")[:-1]
+    return {"/".join(parts[:i + 1]) for i in range(len(parts))}
+
+
 def relative_path(name):
     if not isinstance(name, str) or not name or len(name) > 200:
         raise PolicyError("invalid relative path")
@@ -82,7 +92,9 @@ class Workspace:
     def snapshot(self):
         if self.path.is_symlink() or not self.path.is_dir():
             raise PolicyError("worktree missing or replaced")
-        files, total, entries = {}, 0, 0
+        # Directories are part of the evidence too: an empty directory added after
+        # review changes the tree (for example Python namespace-package imports).
+        files, directories, total, entries = {}, {}, 0, 0
         for parent, dirs, names in os.walk(self.path, followlinks=False):
             dirs.sort()
             names.sort()
@@ -99,6 +111,7 @@ class Workspace:
                 if p.is_symlink():
                     raise PolicyError("symlink rejected")
                 if p.is_dir():
+                    directories[rel] = {"mode": stat.S_IMODE(p.lstat().st_mode)}
                     continue
                 body, mode = read_regular(p)
                 total += len(body)
@@ -106,7 +119,9 @@ class Workspace:
                     raise PolicyError("snapshot budget exceeded")
                 files[rel] = {"sha256": hashlib.sha256(body).hexdigest(),
                               "mode": mode, "text": body.decode("utf-8")}
-        return {"files": files, "sha256": digest(files)}
+        snapshot = {"files": files, "dirs": directories}
+        snapshot["sha256"] = snapshot_digest(snapshot)
+        return snapshot
 
     def apply(self, edits, allowed):
         if not isinstance(edits, list) or len(edits) != 1:
@@ -131,10 +146,26 @@ class Workspace:
             output.flush()
             os.fsync(output.fileno())
 
-    def dispose(self):
+    def dispose(self, reviewed=None):
+        """Remove the worktree with Git, never --force.
+
+        Without `reviewed`, only a clean worktree goes; any output is retained. With a
+        hash-verified `reviewed` snapshot from stored evidence, its files and
+        directories are deleted first, but only if the live tree is exactly that
+        snapshot: nothing that is not already preserved in SQLite can be lost.
+        """
         if self.path.is_symlink() or self.repo.is_symlink():
             raise PolicyError("unsafe workspace path")
         if not self.path.exists():
             return
-        # Deliberately no --force: preserve all uncommitted output.
+        if reviewed is not None:
+            if self.snapshot() != reviewed:
+                raise PolicyError("worktree differs from the reviewed evidence; retained for audit")
+            for name, meta in sorted(reviewed["files"].items()):
+                body, _ = read_regular(self.path / name)
+                if hashlib.sha256(body).hexdigest() != meta["sha256"]:
+                    raise PolicyError("file changed during disposal; retained: " + name)
+                (self.path / name).unlink()
+            for name in sorted(reviewed["dirs"], key=lambda n: n.count("/"), reverse=True):
+                (self.path / name).rmdir()
         self.git("--git-dir=" + str(self.repo), "worktree", "remove", str(self.path))

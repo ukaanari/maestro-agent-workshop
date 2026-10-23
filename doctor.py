@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from workspace import Workspace, read_regular
 GIT = "/usr/bin/git"            # the exact binary workspace.Workspace.git runs
 MIN_GIT = (2, 42)               # first release with `git worktree add --orphan`
 TESTED = ("26", "arm64")        # macOS major version and machine actually tested
+SUPPORTED_PYTHON = (3, 9)       # the Xcode Command Line Tools interpreter CI requires
 
 
 def result(check, status, detail, fix=None):
@@ -60,6 +62,11 @@ def check_python(exe=None, prefix=None, version=None):
                       "which the sandbox path policy refuses to grant" % prefix,
                       "Use an interpreter installed outside your home directory "
                       "(Xcode Command Line Tools, python.org or Homebrew), not pyenv/conda/uv")
+    if version[:2] != SUPPORTED_PYTHON:
+        known = " Python 3.15 has known sandbox test failures (#7)." if version[:2] >= (3, 15) else ""
+        return result("python", "warn", detail + "; only Python 3.9 (Xcode Command Line Tools) "
+                      "is the supported, fully tested interpreter." + known,
+                      "Use /usr/bin/python3 for supported results, or run the full test suite")
     return result("python", "ok", detail)
 
 
@@ -68,7 +75,7 @@ def check_sandbox(binary=SANDBOX_EXEC):
         try:
             Seatbelt([os.path.realpath(tmp)], allowed_executables=[python_runtime()[0]],
                      binary=binary).available()
-        except (PolicyError, OSError) as exc:
+        except (RuntimeError, OSError, ValueError) as exc:  # includes timeouts
             return result("sandbox", "fail", str(exc),
                           "MAESTRO needs a working %s; it never runs agents unconfined" % SANDBOX_EXEC)
     return result("sandbox", "ok", "%s denied an outside write and allowed an inside write "
@@ -127,7 +134,15 @@ def check_git():
 
 
 def check_state_root(root):
-    raw = Path(root).absolute()
+    try:
+        return _state_root(Path(root).absolute())
+    except OSError as exc:
+        return result("state_root", "fail", "cannot inspect %s: %s" % (root, exc),
+                      "Make the state root readable by this user, or choose another --root")
+
+
+def _state_root(raw):
+    # Mirrors workflow.Store's acceptance rules without creating or adopting anything.
     if raw.is_symlink():
         return result("state_root", "fail", "%s is a symlink, which MAESTRO refuses" % raw)
     if not raw.exists():
@@ -138,29 +153,46 @@ def check_state_root(root):
     if not raw.is_dir():
         return result("state_root", "fail", "%s is not a directory" % raw)
     marker = raw / "MAESTRO-P0"
-    if marker.exists() or marker.is_symlink():
-        try:
-            owned = read_regular(marker)[0] == b"synthetic-only-v1\n"
-        except (PolicyError, OSError):
-            owned = False
-        if owned:
-            return result("state_root", "ok", "%s is an existing MAESTRO state root" % raw)
+    if not (marker.exists() or marker.is_symlink()):
+        if any(raw.iterdir()):
+            return result("state_root", "fail", "%s is not empty and not a MAESTRO state root" % raw,
+                          "Point --root at a new or empty directory")
+        return result("state_root", "ok", "%s is empty; initialised on first use" % raw)
+    try:
+        owned = read_regular(marker)[0] == b"synthetic-only-v1\n"
+    except PolicyError:
+        owned = False
+    if not owned:
         return result("state_root", "fail", "%s has an unrecognised MAESTRO marker" % raw)
-    if any(raw.iterdir()):
-        return result("state_root", "fail", "%s is not empty and not a MAESTRO state root" % raw,
-                      "Point --root at a new or empty directory")
-    return result("state_root", "ok", "%s is empty; initialised on first use" % raw)
+    tasks, db = raw / "tasks", raw / "state.sqlite3"
+    if tasks.is_symlink() or (tasks.exists() and not tasks.is_dir()):
+        return result("state_root", "fail", "%s is not a real directory" % tasks)
+    if db.exists() or db.is_symlink():
+        info = db.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return result("state_root", "fail", "%s is a symlink, hardlink or special file; "
+                          "MAESTRO refuses it" % db)
+    return result("state_root", "ok", "%s is an existing MAESTRO state root" % raw)
+
+
+def guarded(name, check, *args):
+    """A check that crashes is reported as a failure, never as a traceback."""
+    try:
+        return check(*args)
+    except Exception as exc:  # noqa: BLE001 - doctor must always produce a report
+        return result(name, "fail", "check crashed: %s: %s" % (type(exc).__name__, exc))
 
 
 def run_checks(root, sandbox_binary=SANDBOX_EXEC, system=None):
-    checks = [check_platform(system), check_python(), check_state_root(root)]
+    checks = [guarded("platform", check_platform, system), guarded("python", check_python),
+              guarded("state_root", check_state_root, root)]
     if checks[0]["status"] == "fail":
         checks += [skipped(name, "unsupported platform") for name in ("sandbox", "confined_worker", "git")]
     else:
-        checks.append(check_sandbox(sandbox_binary))
-        checks.append(check_worker(sandbox_binary) if checks[-1]["status"] == "ok"
-                      else skipped("confined_worker", "sandbox unavailable"))
-        checks.append(check_git())
+        checks.append(guarded("sandbox", check_sandbox, sandbox_binary))
+        checks.append(guarded("confined_worker", check_worker, sandbox_binary)
+                      if checks[-1]["status"] == "ok" else skipped("confined_worker", "sandbox unavailable"))
+        checks.append(guarded("git", check_git))
     checks.append(result("real_agents", "info", "Codex CLI and Claude Code adapters are disabled; "
                          "only deterministic fake agents run (see docs/ROADMAP.md)"))
     return {"ok": all(c["status"] != "fail" for c in checks), "checks": checks}

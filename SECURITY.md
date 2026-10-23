@@ -39,7 +39,7 @@ and there are no versioned releases yet.
 These are listed in [P1A-SECURITY.md](P1A-SECURITY.md) and the README. Reports that
 *demonstrate a concrete exploit* of one of them are still welcome.
 
-* A `setsid()` or double-forked child survives process-group cleanup when `fork` is
+* A `setsid()`/`setpgid()` or double-forked child survives process-group cleanup (#2) when `fork` is
   allowed. Fork is denied for all non-test policies.
 * `sandbox-exec` is deprecated and undocumented, so semantics may change across macOS
   versions.

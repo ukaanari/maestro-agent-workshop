@@ -27,9 +27,23 @@ write only their private task `home/`, read only the Python runtime and four nam
 MAESTRO source files, no fork, no network. Git setup commands remain unconfined
 coordinator operations with fixed argv (unchanged from P0).
 
-Each launch: (1) validates the policy, (2) runs a self-test that proves the engine
-denies an outside write and permits an inside write, (3) executes. Any failure →
-`IsolationUnavailable` → task `blocked`. Nothing falls back to unconfined execution.
+Each launch:
+1. validates the policy;
+2. runs a self-test that proves the engine denies an outside write and permits an inside
+   write;
+3. executes.
+
+Any failure leads to `IsolationUnavailable`, and the task ends `blocked`. Nothing falls
+back to unconfined execution.
+
+The self-test honours cancellation. It also requires the probe to *report* the refused
+write (non-zero exit), so an engine that never runs the target is rejected (F-03).
+
+The engine binary must be a canonical path, not a symlink, and a regular file owned by
+root or this user that is not group- or world-writable.
+
+A deliberately deceptive engine binary can defeat any self-test. The real defence is that
+binary's location and ownership.
 
 ## Controls implemented
 
@@ -41,11 +55,31 @@ denies an outside write and permits an inside write, (3) executes. Any failure �
 * Paths must be absolute, existing and canonical (no symlink or `..` components).
 * Writable grants must be user-owned directories **strictly inside** an approved disposable
   root (`tasks/<id>/`). The grant root itself cannot be renamed, removed or chmod-ed.
-* Protected paths are denied by a final rule even inside grants: `state.sqlite3*`,
-  `MAESTRO-P0`, `tasks/<id>/repo.git`, `executor.lock`, `worktree/.git`.
-* Rejected grants: `/`, `$HOME` or its ancestors, directory subtrees inside `$HOME` outside
-  approved roots, the MAESTRO source subtree (contains `.maestro/`), any readable grant
-  containing protected state, executables inside writable paths.
+* Protected paths (`state.sqlite3*`, `MAESTRO-P0`, `tasks/<id>/repo.git`, `executor.lock`,
+  `worktree/.git`) are denied reading, writing **and execution** by a final rule. Inside a
+  writable grant, a protected path may only be a **direct child** of the grant.
+  - A deeper one could be moved out of its `(subpath ...)` rule by renaming an
+    intermediate directory. The independent audit confirmed this (F-01), and such
+    policies are now rejected.
+  - A direct child cannot move: its only ancestor in the grant is the grant root, whose
+    rename is denied.
+  - These attempts against a direct child are all denied, and the regression tests check
+    them: renaming it, replacing or removing it, renaming the root, case-variant paths,
+    hard links and symlinks. A `renamex_np` swap was also checked by hand.
+* Rejected grants and policies:
+  - `/`, the account home or its ancestors;
+  - directory subtrees inside the home outside approved roots;
+  - the MAESTRO source subtree (contains `.maestro/`);
+  - any readable grant containing protected state.
+* The account home comes from the password database, not `$HOME`, which the caller
+  controls.
+* Listable grants are limited to the MAESTRO source directory or directories inside an
+  approved root.
+* Executables must be owned by root or this user and must not be group- or
+  world-writable. They must not sit inside an approved root, protected state or a
+  personal directory.
+* Approved roots must be directories owned by this user that are not group- or
+  world-writable. That rules out shared places such as `/private/tmp`.
 
 **Network** — `(deny network*)`; only `network="deny"` is accepted. No Mach services, so no
 DNS either. Future connectivity design is below; nothing is activated.
@@ -149,9 +183,21 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   never made a task approvable.
 * **Homebrew Python 3.15.0: known incompatibility, profile not widened
   ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).** `doctor`, the
-  orchestration tests and the demo pass; the production agent policy denies fork. The 4
-  confinement tests that use `allow_fork=True` fail because spawning a child process (and
-  `os.uname()` during `import ctypes`) raises `PermissionError` inside the profile.
+  orchestration tests and the demo pass; the production agent policy denies fork.
+  *Correction (independent audit F-04):* an earlier version of this section said all 4
+  failing tests use `allow_fork=True`. That was wrong:
+  - **3 failing tests use `allow_fork=True`.** They start children through
+    `sys.executable`, which on Homebrew is the framework launcher
+    (`.../Versions/3.15/bin/python3.15`, reached through the `opt/` symlink). That is not
+    the allowlisted interpreter binary.
+  - **The 4th, the process-isolation test, does not.** It runs with fork *denied* and
+    aborted at a top-level `import ctypes`, because `os.uname()` is denied. As a result,
+    *none* of its env, signal, inspection or fork probes ran on 3.15.
+
+  The tests now start children from the allowlisted binary. They run the non-`ctypes`
+  probes independently and report a `ctypes`-dependent probe that could not run as a
+  failure, never a pass. On 3.15, only the two process-inspection probes are expected to
+  fail. That is a prediction CI has not yet confirmed.
   The CI run's kernel sandbox log (diagnostics step) attributes both:
   * **Child spawns:** `file-read-metadata /opt/homebrew/opt/python@3.15` was denied
     exactly 4 times, once per Python child the failing tests start. On Homebrew,
@@ -161,10 +207,54 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
   * **`os.uname()`:** `sysctl-read` of `kern.ostype`, `kern.osrelease`, `kern.version`,
     `kern.hostname` and `hw.machine` was denied. The profile allows only
     `kern.bootargs` and `security.mac.lockdown_mode_state`.
-  **No failure indicated an escape**: every one was a denial. A fix would mean either
-  launching children by the canonical interpreter path or granting specific metadata
-  and sysctl reads. Each grant needs its own justification and
+  **No failure indicated an escape**: every one was a denial. Granting the `opt/`
+  metadata read alone would *not* have helped: the launcher it leads to is not
+  allowlisted for `process-exec` either. Any future grant, for example named
+  `sysctl-read` entries for `os.uname()`, needs its own justification and
   test, and the mutation checks above must still catch every weakening.
-  Until #7 is resolved, CI runs this interpreter as an experimental, non-blocking
-  job. It still runs the full, unmodified suite, and its failures stay visible.
-  The Xcode Python job is the required check.
+  Until #7 is resolved, CI runs this interpreter as an experimental job, which is not a
+  required check. It runs the full suite and passes only if the failing tests are
+  *exactly* the listed known ones (`.github/scripts/check_suite.py`), so any other
+  regression is visible. The Xcode Python job is the required check.
+
+## Independent audit remediation (2026-10-23)
+
+An independent review of `5c4d596` reported findings F-01 to F-07. Each one was first
+reproduced on disposable synthetic fixtures. Each fix has a regression test in
+`tests/test_audit_regressions.py` that fails on `5c4d596` and passes after the fix. A
+mutation run then put each weakness back into the fixed code, to confirm the suite
+catches it. Summary:
+
+* **F-01, protected-path rename bypass:** fixed by rejecting overlaps deeper than a direct
+  child. The protected rule now also denies `process-exec*`.
+* **F-02, process-group cleanup:**
+  - The child stays unreaped until the whole group has been signalled, so no signal can
+    reach a reused pid.
+  - The SIGTERM grace now covers every group member.
+  - EPERM is accepted only when `libproc` shows that every remaining member is a zombie.
+    Otherwise it is an error.
+  - Cleanup fails loudly if a live member survives SIGKILL, or if the child cannot be
+    reaped.
+  - The pipes are always closed.
+  - Descendants that leave the group are still out of reach (#2).
+* **F-03, policy validation:** account home from the password database; listable,
+  executable and approved-root restrictions; canonical engine binary; stricter self-test.
+* **F-04, Python 3.15 diagnosis and CI:** documentation corrected, test structure fixed,
+  and an exact known-failure gate in CI.
+* **F-05, evidence and disposal:**
+  - Directories, with their path and mode, are now part of the snapshot and its hash.
+  - Verification requires exactly the target file and its parent directories.
+  - `dispose --remove-reviewed-output` deletes output only when it exactly matches the
+    stored, hash-verified handoff.
+* **F-06, `doctor` reliability:** every check is guarded and reported, never a traceback.
+  The state-root inspection mirrors the store's own rules.
+* **F-07, races and malformed records:**
+  - A concurrent cancel ends a run cleanly.
+  - Malformed records fail as policy errors.
+  - Approval re-binds the handoff to the task's title and criteria.
+  - The self-test honours cancellation.
+  - Non-numeric timeouts are rejected.
+
+Not changed by this work: issues #2 to #7 remain open. The wall-clock time of an agent
+phase is its configured timeout, plus a self-test of at most 5 s, plus at most about
+2.2 s of cleanup.

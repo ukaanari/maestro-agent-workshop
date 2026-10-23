@@ -165,31 +165,46 @@ attempt("unix_socket", lambda: socket.socket(socket.AF_UNIX).connect(sys.argv[2]
         self.addCleanup(sibling.wait)
         self.addCleanup(sibling.kill)
         result = self.confined('''
-import ctypes
-libc = ctypes.CDLL(None, use_errno=True)
-def procargs(pid):
-    mib, size = (ctypes.c_int * 3)(1, 49, pid), ctypes.c_size_t(65536)
-    buf = ctypes.create_string_buffer(65536)
-    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
-        raise PermissionError("procargs")
-    return b"SYNTHETIC" in buf.raw[:size.value]
-def pidpath(pid):
-    buf = ctypes.create_string_buffer(4096)
-    if libc.proc_pidpath(pid, buf, 4096) <= 0:
-        raise PermissionError("pidpath")
-    return buf.value
 results["env"] = sorted(os.environ)
 attempt("signal_parent", lambda: os.kill(os.getppid(), 0))
 attempt("signal_launchd", lambda: os.kill(1, 0))
-attempt("sibling_environment", lambda: procargs(int(sys.argv[1])))
-attempt("parent_executable", lambda: pidpath(os.getppid()))
 attempt("fork", lambda: os.fork() or os._exit(0))
+# Only the inspection probes need ctypes. Some interpreters cannot even import it
+# inside the profile (issue #7); that must not stop the probes above from running.
+try:
+    import ctypes
+except Exception as exc:
+    results["ctypes"] = "unavailable:" + type(exc).__name__
+else:
+    results["ctypes"] = "ok"
+    libc = ctypes.CDLL(None, use_errno=True)
+    def procargs(pid):
+        mib, size = (ctypes.c_int * 3)(1, 49, pid), ctypes.c_size_t(65536)
+        buf = ctypes.create_string_buffer(65536)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            raise PermissionError("procargs")
+        return b"SYNTHETIC" in buf.raw[:size.value]
+    def pidpath(pid):
+        buf = ctypes.create_string_buffer(4096)
+        if libc.proc_pidpath(pid, buf, 4096) <= 0:
+            raise PermissionError("pidpath")
+        return buf.value
+    attempt("sibling_environment", lambda: procargs(int(sys.argv[1])))
+    attempt("parent_executable", lambda: pidpath(os.getppid()))
 ''', str(sibling.pid), env=(("NO_COLOR", "1"),))
-        self.assertEqual(result.pop("env"), ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT",
-                                             "HOME", "LC_ALL", "NO_COLOR", "PATH", "TMPDIR"])
-        for name, outcome in result.items():
+        with self.subTest(probe="env"):
+            self.assertEqual(result.pop("env"), ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT",
+                                                 "HOME", "LC_ALL", "NO_COLOR", "PATH", "TMPDIR"])
+        ctypes_state = result.pop("ctypes")
+        for name in ("signal_parent", "signal_launchd", "fork"):
             with self.subTest(probe=name):
-                self.assertEqual(outcome, "denied:PermissionError")
+                self.assertEqual(result.pop(name), "denied:PermissionError")
+        # A probe that could not run is a failure, never a pass.
+        for name in ("sibling_environment", "parent_executable"):
+            with self.subTest(probe=name):
+                self.assertEqual(ctypes_state, "ok", "probe not run: ctypes unavailable in the sandbox (#7)")
+                self.assertEqual(result.pop(name), "denied:PermissionError")
+        self.assertEqual(result, {})
 
     def test_forked_children_stay_confined_and_cannot_exec_shells(self):
         result = self.confined('''
@@ -197,10 +212,10 @@ import subprocess
 for name, argv in (("shell", ["/bin/sh", "-c", "true"]), ("sandbox_exec", ["/usr/bin/sandbox-exec", "-n", "no-network", "/usr/bin/true"]),
                    ("other_binary", ["/usr/bin/true"])):
     attempt(name, lambda: subprocess.run(argv).returncode)
-attempt("python_child_reads_outside", lambda: subprocess.run([sys.executable, "-I", "-c",
+attempt("python_child_reads_outside", lambda: subprocess.run([sys.argv[2], "-I", "-c",
     "open(%r).read()" % (sys.argv[1] + "/canary.txt")], capture_output=True).returncode)
-attempt("python_child_ok", lambda: subprocess.run([sys.executable, "-I", "-c", "print(1)"], capture_output=True).stdout)
-''', str(self.outside), allow_fork=True)
+attempt("python_child_ok", lambda: subprocess.run([sys.argv[2], "-I", "-c", "print(1)"], capture_output=True).stdout)
+''', str(self.outside), EXE, allow_fork=True)  # children run the allowlisted binary itself
         for name in ("shell", "sandbox_exec", "other_binary"):
             self.assertEqual(result[name], "denied:PermissionError", name)
         self.assertEqual(result["python_child_reads_outside"], "ok:1")
@@ -212,9 +227,9 @@ attempt("python_child_ok", lambda: subprocess.run([sys.executable, "-I", "-c", "
         with self.assertRaises(DeadlineExceeded):
             self.confined('''
 import subprocess, time
-subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(1); open('late.txt', 'w').write('x')"])
+subprocess.Popen([sys.argv[1], "-I", "-c", "import time; time.sleep(1); open('late.txt', 'w').write('x')"])
 time.sleep(30)
-''', allow_fork=True, timeout=0.5)
+''', EXE, allow_fork=True, timeout=0.5)
         self.assertLess(time.monotonic() - start, 5)
         time.sleep(1.3)
         self.assertFalse((self.ws / "late.txt").exists())
@@ -225,10 +240,10 @@ time.sleep(30)
         with self.assertRaises(Cancelled):
             self.confined('''
 import subprocess, time
-subprocess.Popen([sys.executable, "-I", "-c",
+subprocess.Popen([sys.argv[1], "-I", "-c",
     "import os, time; open('child.pid', 'w').write(str(os.getpid())); time.sleep(1); open('late.txt', 'w').write('x')"])
 time.sleep(30)
-''', allow_fork=True, timeout=10, cancelled=lambda: marker.exists() and marker.stat().st_size > 0)
+''', EXE, allow_fork=True, timeout=10, cancelled=lambda: marker.exists() and marker.stat().st_size > 0)
         pid = int(marker.read_text())
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:

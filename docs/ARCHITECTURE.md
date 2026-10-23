@@ -23,7 +23,19 @@ created → preparing → implementing → reviewing → verifying → awaiting_
   create a new task.
 * **Single owner.** A per-task `flock` stops two coordinators from driving the same task.
 * **Cancellation** is a persisted flag. The running coordinator polls it every 25 ms, kills
-  the child process group, and the cancellation wins over any pending transition.
+  the child process group, and the cancellation wins over any pending transition. A cancel
+  that lands before the first transition ends the run as `cancelled`, not as an error.
+* **Process cleanup** (`execution.stop_group`):
+  1. SIGTERM to the whole group;
+  2. up to 150 ms of grace for every member;
+  3. SIGKILL;
+  4. a check, through macOS `libproc`, that no live member remains;
+  5. only then is the child reaped.
+
+  Keeping the child unreaped until the end reserves its pid and group id, so no signal can
+  reach a reused pid. EPERM is accepted only when every remaining member is a zombie.
+  A surviving live member, or a child that cannot be reaped, is an error. Processes that
+  leave the group (`setsid`, `setpgid`) are not reached (#2).
 
 ## Phases
 
@@ -35,8 +47,9 @@ created → preparing → implementing → reviewing → verifying → awaiting_
    (path + text), never a shell command. The **coordinator**, not the agent, applies it. It
    accepts only the single declared target path, and rejects absolute paths, traversal,
    dot-files, symlinks, hardlinks, special files and overwrites.
-3. **Snapshot and handoff.** The coordinator hashes every regular file in the worktree:
-   bytes, relative path and permission mode, including untracked and ignored files. The
+3. **Snapshot and handoff.** The coordinator hashes every regular file in the worktree
+   (bytes, relative path and permission mode, including untracked and ignored files) and
+   every directory (relative path and mode). The
    handoff artifact (task, acceptance criterion, implementation summary, full snapshot) is
    stored in SQLite with its own SHA-256. The implementer has already exited.
 4. **Review.** A *fresh* fake reviewer process receives the hash-verified handoff envelope.
@@ -80,7 +93,8 @@ For every launch MAESTRO generates a profile starting from `(deny default)`:
   metadata of the granted paths' ancestor directories. Nothing else under the user's home.
 * **Writes:** only directories strictly inside the task's own directory. Protected paths
   (`state.sqlite3*`, the `MAESTRO-P0` marker, `repo.git`, `executor.lock`, `worktree/.git`)
-  are denied even inside writable grants.
+  are denied reading, writing and execution. Inside a writable grant they may only be
+  direct children of it, because a deeper path could be moved by renaming an ancestor.
 * **Exec:** only allowlisted, canonical, non-writable binaries. Shells, `env`, `osascript`,
   `sudo`, `open`, `launchctl`, `xargs` and `sandbox-exec` are always refused. Fork is
   denied unless explicitly allowed.

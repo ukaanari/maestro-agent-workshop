@@ -16,14 +16,56 @@ run.** The Codex CLI and Claude Code adapters still always refuse.
 * `maestro.py --version`.
 * GitHub Actions CI on macOS 26 arm64. It runs `doctor`, the test suite and the demo with
   the Xcode and Homebrew Pythons, with read-only token permissions and no secrets. The
-  Xcode Python passes everything. Homebrew Python 3.15 fails the 4 fork-enabled
-  confinement tests through sandbox denials; this is documented in `P1A-SECURITY.md`,
-  and the profile was not widened. Python 3.15 is experimental: its job is non-blocking
-  but runs the full suite, with known failures tracked in #7. The Xcode Python job is
-  the required check.
+  Xcode Python passes everything. On `5c4d596`, Homebrew Python 3.15 failed 4
+  confinement tests through sandbox denials. 3 of them are fork-enabled, and the
+  process-isolation test aborted at `import ctypes` (see F-04 below). This is documented
+  in `P1A-SECURITY.md`, and the profile was not widened. Python 3.15 is experimental: its
+  job is not required, and it passes only if the failing tests are exactly the known
+  ones (#7). The Xcode Python job is the required check.
 * A README walkthrough of a single task end to end, verified verbatim in bash and zsh.
   The demo now checks the snapshot hash, which is identical on every machine.
-* 6 tests for `doctor` and 1 cleanup regression test, bringing the suite to 43. The original 36 are unchanged.
+* 6 tests for `doctor`, 1 cleanup regression test and 28 audit regression tests, bringing the suite to 71.
+  The original 36 tests keep every assertion. Three security tests now start children from the
+  allowlisted binary, and the process-isolation test runs its probes independently (F-04).
+
+### Security and correctness fixes (independent audit of `5c4d596`, findings F-01 to F-07)
+
+Each fix comes with a regression test in `tests/test_audit_regressions.py`, which fails on
+`5c4d596` and passes after the fix.
+
+* **F-01, high.** A protected path nested more than one level inside a writable grant could
+  be exposed by renaming an intermediate directory. Such policies are now rejected, and
+  protected paths also deny execution.
+* **F-02, high.** Process-group cleanup was reworked:
+  - every member now gets the SIGTERM grace;
+  - nothing is signalled after the child has been reaped;
+  - EPERM is accepted only for zombie-only groups, as confirmed through `libproc`;
+  - a surviving live member, or a child that cannot be reaped, raises `PolicyError`;
+  - the pipes are always closed.
+* **F-03, medium.** Policy validation is stricter:
+  - the account home comes from the password database;
+  - listable grants are restricted;
+  - executables must sit outside agent roots, protected state and personal directories,
+    and be owned by root or this user;
+  - approved roots must not be shared or broadly writable;
+  - the sandbox engine must not be a symlink;
+  - the self-test requires the refused write to be reported.
+* **F-04, medium.** The Python 3.15 analysis was corrected: 3 of the 4 failing tests use
+  fork, and the 4th aborted at `import ctypes`. Child processes now start from the
+  allowlisted binary. Isolation probes run independently, and a probe that could not run
+  is reported as a failure. CI accepts only the exact listed known failures. `doctor` warns
+  on interpreters other than the supported one.
+* **F-05, medium.** Snapshots now include directories, with path and mode; *this changes
+  every snapshot hash*. `dispose --remove-reviewed-output` removes output only when it
+  exactly matches the stored, hash-verified handoff.
+* **F-06, low.** `doctor` never crashes. Unreadable roots, unsafe database or task paths,
+  probe timeouts and failing checks are all reported as structured failures.
+* **F-07, low.**
+  - A concurrent cancel now ends a run cleanly.
+  - Malformed records fail as policy errors.
+  - Approval re-checks the handoff against the task specification.
+  - The self-test honours cancellation.
+  - Non-numeric timeouts are rejected.
 
 ### Fixed
 

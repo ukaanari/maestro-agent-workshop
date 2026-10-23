@@ -21,23 +21,23 @@ jobs:
     name: macos-26 arm64 / ${{ matrix.python.name }}
     runs-on: macos-26
     timeout-minutes: 15
-    # The experimental job still runs the full, unmodified suite and its job
-    # fails visibly; it just does not fail the workflow while its issue is open.
-    continue-on-error: ${{ matrix.python.experimental }}
     strategy:
       fail-fast: false
       matrix:
         python:
           # Interpreters outside the home directory; hosted tool-cache Pythons
           # live under the runner's home and are refused by the sandbox policy.
+          # known_failures: test ids allowed to fail (tracked in an issue). Any other
+          # failure, or a known failure that starts passing, fails the job.
           - name: Xcode Python (supported)
             path: /usr/bin/python3
-            experimental: false
+            known_failures: ""
           - name: "Homebrew Python 3.15 (experimental, known failures #7)"
             path: /opt/homebrew/bin/python3
-            experimental: true
+            known_failures: test_security.ConfinementTests.test_process_isolation_env_signals_and_inspection
     env:
       PY: ${{ matrix.python.path }}
+      KNOWN_FAILURES: ${{ matrix.python.known_failures }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Check out
@@ -56,8 +56,8 @@ jobs:
       - name: Prerequisite check (maestro doctor)
         run: '"$PY" -B maestro.py doctor'
 
-      - name: Test suite
-        run: '"$PY" -B -m unittest discover -s tests -v'
+      - name: Test suite (full; only the listed known failures may fail)
+        run: '"$PY" -B .github/scripts/check_suite.py $KNOWN_FAILURES'
 
       - name: End-to-end demo
         if: ${{ !cancelled() }}

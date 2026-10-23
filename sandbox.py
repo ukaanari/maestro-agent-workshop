@@ -14,6 +14,7 @@ Worktrees, cwd, HOME and process groups are NOT the boundary; this module is.
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import pwd
 import shutil
 import stat
 import sys
@@ -34,7 +35,18 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "env", "osa
           "sudo", "su", "login", "open", "launchctl", "xargs", "sandbox-exec"}
 ENV_ALLOWLIST = {"LANG", "NO_COLOR", "TERM"}
 MAX_ARGS, MAX_ARG = 64, 8192
-USER_HOME = os.path.realpath(os.path.expanduser("~"))
+
+
+def account_home():
+    """The account's home from the password database. $HOME is caller-controlled and
+    must not decide what counts as personal. Unknown home: everything is personal."""
+    try:
+        return os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        return "/"
+
+
+USER_HOME = account_home()
 SOURCE_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -93,6 +105,11 @@ class Seatbelt:
         self.allowed_executables = frozenset(canonical_path(e, "executable") for e in allowed_executables)
         for root in self.approved_roots:
             self._not_broad(root, "approved root")
+            info = os.lstat(root)
+            # Another account able to write here could swap the agents' directories.
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise PolicyError("approved root must be a directory owned by this user and "
+                                  "not group/world-writable: " + root)
         for path in self.protected:
             if not os.path.isabs(path) or os.path.realpath(path) != path:
                 raise PolicyError("protected paths must be canonical: " + path)
@@ -120,9 +137,15 @@ class Seatbelt:
         exe = canonical_path(policy.executable, "executable")
         info = os.stat(exe)
         if (exe not in self.allowed_executables or not stat.S_ISREG(info.st_mode) or
-                info.st_mode & 0o022 or not os.access(exe, os.X_OK) or
-                Path(exe).name in SHELLS):
+                info.st_mode & 0o022 or info.st_uid not in (0, os.getuid()) or
+                not os.access(exe, os.X_OK) or Path(exe).name in SHELLS):
             raise PolicyError("executable is not allowlisted: " + exe)
+        # Agents write inside approved roots; nothing there, or in protected state, may run.
+        if (any(inside(exe, root) for root in self.approved_roots) or
+                any(inside(exe, guarded) for guarded in self.protected) or
+                self._personal(exe, allow_source=False)):
+            raise PolicyError("executable must live outside agent roots, protected state "
+                              "and personal directories: " + exe)
         if (not isinstance(policy.args, tuple) or len(policy.args) > MAX_ARGS or
                 any(not isinstance(a, str) or "\x00" in a or len(a) > MAX_ARG for a in policy.args)):
             raise PolicyError("invalid argument vector")
@@ -140,8 +163,13 @@ class Seatbelt:
                 raise PolicyError("writable path must be a directory owned by this user: " + path)
             if not any(inside(path, root) and path != root for root in self.approved_roots):
                 raise PolicyError("writable path is outside approved disposable roots: " + path)
-            if inside(exe, path):
-                raise PolicyError("executable must not be agent-writable")
+            for guarded in self.protected:
+                # The profile forbids renaming the grant root itself, so a direct child
+                # keeps its path. Anything deeper moves with an ancestor rename and
+                # escapes its (subpath ...) deny rule.
+                if inside(guarded, path) and guarded != path and os.path.dirname(guarded) != path:
+                    raise PolicyError("protected path inside a writable grant must be a direct "
+                                      "child of it: " + guarded)
         readable = [canonical_path(p, "readable path") for p in policy.readable]
         listable = [canonical_path(p, "listable path") for p in policy.listable]
         for path in readable:
@@ -154,10 +182,13 @@ class Seatbelt:
             if any(inside(guarded, path) for guarded in self.protected):
                 raise PolicyError("readable grant contains protected MAESTRO state: " + path)
         for path in listable:
-            if not os.path.isdir(path) or self._personal(path, allow_source=True):
-                raise PolicyError("listable path must be an approved directory: " + path)
+            # Entry names leak too: only the source directory or the agents' own roots.
+            if not os.path.isdir(path) or not (
+                    path == SOURCE_DIR or any(inside(path, root) for root in self.approved_roots)):
+                raise PolicyError("listable path must be the MAESTRO source directory or inside "
+                                  "an approved root: " + path)
         for path in writable + readable + listable:
-            # Protected paths inside a writable grant are carved out by a final deny rule.
+            # Protected direct children of a writable grant are carved out by a final deny rule.
             if any(inside(path, guarded) for guarded in self.protected):
                 raise PolicyError("grant is inside protected MAESTRO state: " + path)
         cwd = canonical_path(policy.cwd, "working directory")
@@ -198,7 +229,7 @@ class Seatbelt:
             # The approved directory itself cannot be removed, renamed or re-pointed.
             lines.append("(deny file-write* (literal %s))" % ref)
         for path in self.protected:
-            lines.append("(deny file-read* file-write* (subpath %s))" % param("P", path))
+            lines.append("(deny file-read* file-write* process-exec* (subpath %s))" % param("P", path))
         if allow_fork:
             lines.append("(allow process-fork)")
         lines.append("(allow signal (target same-sandbox))")
@@ -217,16 +248,23 @@ class Seatbelt:
             argv += ["-D", "%s=%s" % (name, value)]
         return argv + [exe, *policy.args], cwd, home
 
-    def available(self):
-        """Fail closed unless this host enforces a deny-default write boundary now."""
+    def available(self, cancelled=lambda: False):
+        """Fail closed unless this host enforces a deny-default write boundary now.
+
+        Detects a missing, broken or non-enforcing engine. It cannot detect a
+        deliberately deceptive engine binary, so the binary itself must be a
+        canonical, non-writable file owned by root or this user.
+        """
         if sys.platform != "darwin":
             raise IsolationUnavailable("Seatbelt confinement requires macOS")
         try:
-            info = os.stat(self.binary)
-        except OSError as exc:
-            raise IsolationUnavailable("sandbox engine missing: %s" % self.binary) from exc
-        if (not os.path.isabs(self.binary) or not stat.S_ISREG(info.st_mode) or
-                info.st_mode & 0o022 or info.st_uid not in (0, os.getuid())):
+            binary = canonical_path(self.binary, "sandbox engine")
+            info = os.lstat(binary)
+        except (PolicyError, OSError) as exc:
+            raise IsolationUnavailable("sandbox engine missing or not a canonical path "
+                                       "(symlinks are refused): %s" % self.binary) from exc
+        if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022 or
+                info.st_uid not in (0, os.getuid())):
             raise IsolationUnavailable("sandbox engine binary is not trustworthy")
         probe = Path(os.path.realpath(tempfile.mkdtemp(prefix="maestro-sandbox-probe-")))
         try:
@@ -234,15 +272,16 @@ class Seatbelt:
             inner.mkdir()
             outer.mkdir()
             touch = os.path.realpath("/usr/bin/touch")
-            checker = Seatbelt([str(probe)], allowed_executables=[touch], binary=self.binary)
+            checker = Seatbelt([str(probe)], allowed_executables=[touch], binary=binary)
             argv, cwd, home = checker.command(ExecPolicy(
                 touch, (str(inner / "ok"), str(outer / "escape")), str(inner), str(inner),
                 (str(inner),), timeout=5))
+            denied = False
             try:
-                execute(argv, cwd, home, timeout=5)
+                execute(argv, cwd, home, timeout=5, cancelled=cancelled)
             except PolicyError:
-                pass  # touch must fail on the outside path
-            if (outer / "escape").exists() or not (inner / "ok").exists():
+                denied = True  # touch must report the refused outside write
+            if not denied or (outer / "escape").exists() or not (inner / "ok").exists():
                 raise IsolationUnavailable("sandbox self-test failed: outside write not denied "
                                            "or inside write not permitted")
         finally:
@@ -251,6 +290,6 @@ class Seatbelt:
 
     def run(self, policy, data=b"", cancelled=lambda: False):
         argv, cwd, home = self.command(policy)
-        self.available()
+        self.available(cancelled=cancelled)
         return execute(argv, cwd, home, data=data, timeout=policy.timeout, cancelled=cancelled,
                        max_output=policy.max_output, extra_env=dict(policy.env))

@@ -36,6 +36,9 @@ def main(argv=None):
             cmd.add_argument("--founder", required=True)
         if name == "artifact":
             cmd.add_argument("kind", choices=("handoff", "review", "verification"))
+        if name == "dispose":
+            cmd.add_argument("--remove-reviewed-output", action="store_true",
+                             help="also delete output that exactly matches the stored handoff")
     args = parser.parse_args(argv)
     if args.command == "doctor":
         # Before Store(): diagnosing a host must never create or adopt a state root.
@@ -60,7 +63,7 @@ def main(argv=None):
             elif args.command == "recover":
                 engine.recover(args.task_id)
             elif args.command == "dispose":
-                engine.dispose(args.task_id)
+                engine.dispose(args.task_id, args.remove_reviewed_output)
             result = store.get(args.task_id)
             result["events"] = store.events(args.task_id)
             if result["status"] in {"awaiting_approval", "approved"}:

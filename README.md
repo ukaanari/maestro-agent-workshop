@@ -51,9 +51,9 @@ they approve.
 |---|---|
 | Single-attempt task lifecycle in SQLite (atomic transitions, event log, no retries, no replay after a crash) | **Implemented, tested** |
 | Fake implementer → fresh fake reviewer handoff with no manual copying, bound by SHA-256 to a full workspace snapshot | **Implemented, tested** |
-| Evidence gate: changed, added, deleted or `chmod`-ed files, or tampered stored evidence, invalidate approval | **Implemented, tested** |
+| Evidence gate: changed, added, deleted or `chmod`-ed files or directories, or tampered stored evidence, invalidate approval | **Implemented, tested** |
 | Explicit approval that must name the exact current snapshot hash | **Implemented, tested** |
-| Owned process groups, timeouts, cancellation, output limits, descendant cleanup | **Implemented, tested** |
+| Owned process groups, timeouts, cancellation, output limits; cleanup verifies that no live group member remains (descendants that leave the group are not covered, #2) | **Implemented, tested** |
 | Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
 | Real Codex CLI implementer / Claude Code reviewer adapters | **Not implemented.** Both always refuse. |
 | Running a project's own test suite as verification | **Not implemented.** Verification is a fixed, data-only exact-content check. |
@@ -62,22 +62,28 @@ they approve.
 | Token or cost metering | **Not implemented.** No model is called. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 43 offline tests: 23 for orchestration, 13 for confinement, 6 for `doctor`
-and 1 cleanup regression test. It needs no network, no API keys and no installed agent
-CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
+The suite has 71 offline tests: 23 for orchestration, 13 for confinement, 6 for `doctor`,
+1 cleanup regression test and 28 regression tests for the independent audit findings
+F-01 to F-07. It needs no network, no API keys and no installed agent CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on GitHub-hosted
 `macos-26` arm64 runners, with no secrets. Results by interpreter:
 
 * **Xcode Python: supported, and the required check.** Everything passes.
 * **Homebrew Python 3.15: experimental, with known failures
   ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).** This job runs the
-  full, unmodified suite on every change, and its failures stay visible. It is
-  non-blocking until #7 is resolved.
-  - `doctor`, the orchestration tests and the demo pass.
-  - 4 confinement tests fail. These are the tests that let a confined process fork.
-  - The sandbox *denies* operations that Python 3.15 needs to start child processes and
-    to call `os.uname()`. This is over-restriction, not an escape, and the profile is
-    deliberately not widened to hide it.
-  - **Python 3.15 is not fully compatible.** See
+  full suite on every change. It passes only if the failing tests are *exactly* the
+  listed known ones, so any other regression, or a known failure that starts passing,
+  turns it red. It is not a required check.
+  - **On `main`:** `doctor`, the orchestration tests and the demo pass, and 4
+    confinement tests fail. 3 of them start child processes through `sys.executable`,
+    which on Homebrew is a launcher that the profile does not allowlist. The 4th, the
+    process-isolation test, aborts at `import ctypes`, because `os.uname()` is denied, so
+    none of its probes ran.
+  - **After the audit remediation:** children start from the allowlisted interpreter
+    binary, and the non-`ctypes` isolation probes run independently. Only the two
+    process-inspection probes are expected to stay failing on 3.15. **This is a
+    prediction that CI has not yet confirmed.**
+  - Every failure is a denial, not an escape. The profile is deliberately not widened.
+    **Python 3.15 is not fully compatible.** See
     [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
 
 ## Requirements
@@ -86,9 +92,9 @@ CLIs. [CI](.github/workflows/ci.yml) runs `doctor`, the suite and the demo on Gi
   deprecated (see [Limitations](#limitations)).
 * Python 3.9 or newer. Standard library only, nothing to install.
   - **Supported:** the Xcode Command Line Tools Python (`/usr/bin/python3`).
-  - **Experimental:** Homebrew Python 3.15. MAESTRO's task flow works, but the
-    fork-enabled confinement tests fail
-    ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).
+  - **Experimental:** Homebrew Python 3.15. MAESTRO's task flow works, but some
+    confinement tests fail ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).
+    `doctor` warns for any interpreter other than the supported one.
   - The interpreter must be installed **outside your home directory**. Interpreters under
     your home directory, such as pyenv, conda or uv-managed Pythons, are refused by the
     sandbox's path policy, and tasks end `blocked`. `maestro.py doctor` reports this case.
@@ -105,7 +111,7 @@ disabled. Intel Macs and other macOS major versions have not been verified.
 git clone https://github.com/ukaanari/maestro-agent-workshop.git
 cd maestro-agent-workshop
 python3 maestro.py doctor                  # read-only check of this machine
-python3 -m unittest discover -s tests -v   # 43 tests, about 18 s on the development host
+python3 -m unittest discover -s tests -v   # 71 tests, about 23 s on the development host
 python3 examples/demo.py                   # end-to-end demo in a temporary directory
 ```
 
@@ -165,7 +171,7 @@ m run "$ID"
 ```json
   "status": "awaiting_approval",
   "evidence": {
-    "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+    "snapshot_sha256": "3c992e2089caf176615f6f9c5bb03865490ff4ba7ade1bbae3259f55cb2f0ec6",
     "handoff_sha256": "…", "review_sha256": "…", "verification_sha256": "…"
   }
 ```
@@ -185,7 +191,7 @@ m artifact "$ID" verification
 ```json
 {
   "handoff_sha256": "…",
-  "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+  "snapshot_sha256": "3c992e2089caf176615f6f9c5bb03865490ff4ba7ade1bbae3259f55cb2f0ec6",
   "summary": "Independent fake review fixture; no semantic code review.",
   "verdict": "approved"
 }
@@ -193,7 +199,7 @@ m artifact "$ID" verification
   "check": "exact-file-content-v1",
   "fake_only": true,
   "passed": true,
-  "snapshot_sha256": "45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe",
+  "snapshot_sha256": "3c992e2089caf176615f6f9c5bb03865490ff4ba7ade1bbae3259f55cb2f0ec6",
   "task_id": "…"
 }
 ```
@@ -202,7 +208,7 @@ m artifact "$ID" verification
 re-snapshots the live files first.
 
 ```sh
-m approve "$ID" --snapshot 45cb0ff06b4d0feaf105e39f6a4f5a180e77b1a4b08cc27074dd094a1111a3fe --founder 'Your name'
+m approve "$ID" --snapshot 3c992e2089caf176615f6f9c5bb03865490ff4ba7ade1bbae3259f55cb2f0ec6 --founder 'Your name'
 m status "$ID"
 ```
 
@@ -234,6 +240,7 @@ python3 maestro.py approve TASK_ID --snapshot EXACT_SHA_FROM_STATUS --founder 'Y
 python3 maestro.py cancel  TASK_ID
 python3 maestro.py recover TASK_ID               # mark an abandoned active task interrupted
 python3 maestro.py dispose TASK_ID               # remove a terminal task's *clean* worktree
+python3 maestro.py dispose TASK_ID --remove-reviewed-output  # also delete output that exactly matches the stored handoff
 ```
 
 All output is JSON. State lives in `.maestro/` beside `maestro.py` (git-ignored), or in an
@@ -242,12 +249,15 @@ a fake-agent behaviour for testing failure paths: `success`, `review-fail`, `sta
 `timeout`, `permission`, `malformed`, `test-fail` or `output-limit`.
 
 `run` exits 0 only when the task reaches `awaiting_approval`, and 2 otherwise. Approval is
-a **local record**. It never stages, commits, pushes or merges anything. The `--founder`
+a **local record**. It never stages, commits, pushes or merges anything. `dispose` only
+removes a clean worktree by default. With `--remove-reviewed-output`, it also deletes
+output, but only if the live worktree is *exactly* the stored, hash-verified handoff
+snapshot, whose full file contents stay in SQLite. Anything else is retained. The `--founder`
 value is an audit label typed by the operator, not authentication.
 
 ## How it works
 
-Seven small Python modules (about 1,200 lines in total):
+Seven small Python modules (about 1,450 lines in total):
 
 | Module | Responsibility |
 |---|---|
@@ -277,10 +287,18 @@ These are deliberate disclosures, not fine print.
   becomes the only boundary, or MAESTRO cannot wrap them. Real agents also need `fork`,
   shells and network access, all of which the current profile denies. These are open
   design decisions; see [docs/ROADMAP.md](docs/ROADMAP.md).
-* **There is a known process-escape gap.** When `fork` is allowed (only in tests today), a
-  child that calls `setsid()` or double-forks survives process-group cleanup. It stays
-  sandboxed, but it can keep running. This must be fixed before real agents are allowed
-  to fork.
+* **There is a known process-escape gap
+  ([#2](https://github.com/ukaanari/maestro-agent-workshop/issues/2)).** When `fork` is
+  allowed (only in tests today), a child that calls `setsid()` or `setpgid()`, or
+  double-forks, leaves the process group and survives cleanup. It stays sandboxed, but it
+  can keep running. This blocks real-agent execution until it is fixed.
+  - Cleanup does verify that no *live member of the group* remains after SIGKILL, and it
+    fails loudly otherwise.
+  - That verification uses macOS `libproc`. Elsewhere, the group is signalled but not
+    verified.
+* **Protected paths must be direct children of a writable grant.** A deeper protected path
+  could be moved out of its deny rule by renaming an ancestor directory. Such policies
+  are rejected (audit finding F-01).
 * **Seatbelt is deprecated and undocumented.** `sandbox-exec` is Apple's deprecated
   interface, so its semantics can change with OS updates. On macOS 26, `(deny default)`
   turned out *not* to block reading other processes' arguments and environment, and
@@ -297,7 +315,7 @@ These are deliberate disclosures, not fine print.
   64 KiB in total.
 * **Few hosts were tested.** Results come from one macOS 26.7 arm64 development Mac and
   GitHub's macOS 26.6.2 arm64 runner image. The full suite passes with the Xcode Python
-  only; with Homebrew Python 3.15, the fork-enabled confinement tests fail
+  only; with Homebrew Python 3.15, some confinement tests fail
   ([#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7)).
 
 ## Roadmap

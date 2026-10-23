@@ -14,7 +14,7 @@ import uuid
 from agents import FakeAdapter, SCENARIOS, envelope
 from execution import Cancelled, DeadlineExceeded, PolicyError
 from sandbox import SANDBOX_EXEC, Seatbelt, python_runtime
-from workspace import Workspace, canonical, digest, directory, read_regular, relative_path
+from workspace import Workspace, canonical, digest, directory, parent_dirs, read_regular, relative_path
 
 ACTIVE = {"preparing", "implementing", "reviewing", "verifying"}
 NEXT = {"created": "preparing", "preparing": "implementing",
@@ -84,6 +84,8 @@ class Store:
         result = dict(row)
         for key in ("spec", "evidence"):
             result[key] = json.loads(result[key])
+            if not isinstance(result[key], dict):
+                raise PolicyError("malformed task record: %s" % key)
         return result
 
     def log(self, conn, task_id, status, message):
@@ -95,7 +97,8 @@ class Store:
         relative_path(target)
         if (not isinstance(title, str) or not title.strip() or len(title) > 2000 or
                 not isinstance(expected, str) or len(expected.encode()) > 8192 or
-                scenario not in SCENARIOS or not math.isfinite(timeout) or not 0 < timeout <= 30):
+                scenario not in SCENARIOS or type(timeout) not in (int, float) or
+                not math.isfinite(timeout) or not 0 < timeout <= 30):
             raise PolicyError("invalid task or execution budget")
         task_id = uuid.uuid4().hex[:16]
         spec = {"title": title, "target": target, "expected": expected,
@@ -126,13 +129,13 @@ class Store:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             old = row["status"]
+            if row["cancel"] and status != "cancelled":
+                raise Cancelled("cancellation wins over state transition")
             allowed = (NEXT.get(old) == status or
                        (old in ACTIVE | {"created", "awaiting_approval"} and status in FAILURES) or
                        (old in {"awaiting_approval", "approved"} and status == "invalidated"))
             if not allowed:
                 raise PolicyError("illegal state transition: %s -> %s" % (old, status))
-            if row["cancel"] and status != "cancelled":
-                raise Cancelled("cancellation wins over state transition")
             encoded = canonical(evidence).decode() if evidence is not None else row["evidence"]
             conn.execute("UPDATE tasks SET status=?,evidence=? WHERE id=?", (status, encoded, task_id))
             self.log(conn, task_id, status, message)
@@ -168,9 +171,14 @@ class Store:
         if row is None:
             raise PolicyError("missing evidence: " + kind)
         value = json.loads(row["body"])
-        if digest(value) != row["hash"]:
+        if not isinstance(value, dict) or digest(value) != row["hash"]:
             raise PolicyError("corrupt evidence: " + kind)
         return value
+
+    def has_artifact(self, task_id, kind):
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM artifacts WHERE task_id=? AND kind=?",
+                                (task_id, kind)).fetchone() is not None
 
     def events(self, task_id):
         with self.connect() as conn:
@@ -249,6 +257,7 @@ class Engine:
                 s.transition(task_id, "verifying", "Running fixed, data-only acceptance check", evidence)
                 current = ws.snapshot()
                 passed = (current == snapshot and set(current["files"]) == {spec["target"]} and
+                          set(current["dirs"]) == parent_dirs(spec["target"]) and
                           current["files"][spec["target"]]["text"] == spec["expected"])
                 verification = {"task_id": task_id, "snapshot_sha256": snapshot["sha256"],
                                 "passed": passed, "check": "exact-file-content-v1", "fake_only": True}
@@ -270,11 +279,20 @@ class Engine:
             return s.get(task_id)
 
     def _finish(self, task_id, state, reason):
-        if self.store.cancelled(task_id):
+        task = self.store.get(task_id)
+        if task["status"] not in ACTIVE | {"created", "awaiting_approval"}:
+            return  # already terminal, e.g. cancelled concurrently: nothing to record
+        if task["cancel"]:
             state = "cancelled"
         self.store.transition(task_id, state, reason)
 
     def check_evidence(self, task_id):
+        try:
+            return self._check_evidence(task_id)
+        except (TypeError, AttributeError, KeyError) as exc:
+            raise PolicyError("malformed evidence: %s" % type(exc).__name__) from exc
+
+    def _check_evidence(self, task_id):
         task = self.store.get(task_id)
         evidence = task["evidence"]
         for kind in ("handoff", "review", "verification"):
@@ -285,7 +303,10 @@ class Engine:
         review = self.store.artifact(task_id, "review")
         verification = self.store.artifact(task_id, "verification")
         sha = evidence.get("snapshot_sha256")
+        spec = task["spec"]
         if (handoff["task_id"] != task_id or handoff["snapshot"]["sha256"] != sha or
+                handoff["task"] != spec["title"] or
+                handoff["criteria"] != {"path": spec["target"], "equals": spec["expected"]} or
                 review["snapshot_sha256"] != sha or review["handoff_sha256"] != evidence["handoff_sha256"] or
                 verification["task_id"] != task_id or verification["snapshot_sha256"] != sha or
                 review["verdict"] != "approved" or verification["passed"] is not True or
@@ -302,7 +323,7 @@ class Engine:
                 raise PolicyError("task is not awaiting approval")
             try:
                 current = self.check_evidence(task_id)
-            except (PolicyError, OSError, ValueError, KeyError) as exc:
+            except (PolicyError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 s.transition(task_id, "invalidated", "Approval blocked: " + str(exc))
                 raise PolicyError("evidence invalidated; create a fresh task") from exc
             if snapshot != current:
@@ -317,12 +338,26 @@ class Engine:
             self._finish(task_id, "interrupted", "Owner absent; marked interrupted without restarting agents")
         return self.store.get(task_id)
 
-    def dispose(self, task_id):
+    def dispose(self, task_id, remove_reviewed_output=False):
+        """Remove a terminal task's worktree; evidence in SQLite is always kept.
+
+        By default only a clean worktree is removed. With remove_reviewed_output, the
+        output is deleted too, but only if it is exactly the stored, hash-verified
+        handoff snapshot, whose full file contents stay in SQLite.
+        """
         with self.store.lock(task_id):
             task = self.store.get(task_id)
             if task["status"] in ACTIVE | {"created", "awaiting_approval"}:
                 raise PolicyError("workspace still needed by task")
-            self.workspace(task_id).dispose()
+            reviewed, message = None, "Clean worktree disposed; evidence retained"
+            if remove_reviewed_output and self.store.has_artifact(task_id, "handoff"):
+                handoff = self.store.artifact(task_id, "handoff")
+                if digest(handoff) != task["evidence"].get("handoff_sha256"):
+                    raise PolicyError("handoff does not match the task's recorded evidence")
+                reviewed = handoff["snapshot"]
+                message = ("Worktree removed after exact match with the stored handoff snapshot; "
+                           "file contents retained in SQLite")
+            self.workspace(task_id).dispose(reviewed)
             with self.store.connect() as conn:
                 conn.execute("UPDATE tasks SET disposed=1 WHERE id=?", (task_id,))
-                self.store.log(conn, task_id, task["status"], "Clean worktree disposed; evidence retained")
+                self.store.log(conn, task_id, task["status"], message)
