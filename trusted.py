@@ -21,6 +21,7 @@ import time
 
 from execution import (Cancelled, DeadlineExceeded, PolicyError, execute,
                        _running, stop_group)
+import reviewer
 from sandbox import Seatbelt, ExecPolicy, python_runtime
 from workflow import ACTIVE, Engine
 from workspace import canonical, digest, directory, read_regular
@@ -29,6 +30,10 @@ MODE = "trusted-local"
 MAX_ENTRIES, MAX_BYTES, MAX_LOG = 2000, 20 * 1024 * 1024, 10 * 1024 * 1024
 NOTICE = "trusted-local: agents run with your user's permissions; not confined by MAESTRO"
 GIT = "/usr/bin/git"
+
+
+class IntegrityError(PolicyError):
+    """The clone snapshot or the source repository changed: recorded evidence no longer holds."""
 
 
 def validate_model(model):
@@ -366,17 +371,19 @@ class TrustedEngine:
         before = source_guard(repo, home)
         self.store.artifact(task_id, phase + "_source_before", before)
         if before != expected:
-            raise PolicyError("source repository guard changed before " + phase)
+            raise IntegrityError("source repository guard changed before " + phase)
         try:
             yield
         finally:
             after = source_guard(repo, home)
             self.store.artifact(task_id, phase + "_source_after", after)
             if after != expected:
-                raise PolicyError("source repository guard changed after " + phase)
+                raise IntegrityError("source repository guard changed after " + phase)
 
-    def start(self, repo, base, task_file, model, cancelled=lambda: False):
+    def start(self, repo, base, task_file, model, cancelled=lambda: False, review_model=None):
         validate_model(model)
+        if review_model is not None:
+            validate_model(review_model)
         if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
             raise PolicyError("trusted-local requires macOS and /usr/bin/python3 (Python 3.9)")
         repo, task_file = Path(repo).resolve(), Path(task_file).resolve()
@@ -386,6 +393,9 @@ class TrustedEngine:
         spec = {"mode": MODE, "model": model, "execution_context": "test" if self.test_context else "normal",
                 "repo": str(repo), "base": base, "task_file": str(task_file),
                 "prompt": prompt, "verify_command": verification_command()}
+        if review_model is not None:
+            # Only review-required tasks carry the key, so Codex-only task identities are unchanged.
+            spec["review"] = {"provider": reviewer.PROVIDER, "model": review_model}
         task_id = digest(spec)[:16]
         home = self.store.task_dir(task_id)
         # Deterministic identity deliberately refuses a second start of the same task.
@@ -463,7 +473,7 @@ class TrustedEngine:
         current = snapshot(home / "clone", home, snap["base"])
         # Ignored names are reported but deliberately outside the approved hash.
         if current["sha256"] != snap["sha256"]:
-            raise PolicyError("clone snapshot changed")
+            raise IntegrityError("clone snapshot changed")
         return snap
 
     def build_verify(self, task_id, snap):
@@ -575,10 +585,58 @@ class TrustedEngine:
             raise PolicyError("test task approval/export requires explicit test context")
         return context
 
-    def approve(self, task_id, snapshot_hash, founder):
+    def review_gate(self, task_id, context, override=None, snap=None):
+        """Approval/export precondition for review-required tasks; returns approval fields.
+
+        Without snap it checks only recorded evidence, so a missing, unfinished or
+        blocking review refuses approval without invalidating the task. With snap it
+        also binds the review to the current snapshot and its exact tree patch.
+        """
+        task = self.require(task_id)
+        requested = task["spec"].get("review")
+        if requested is None:
+            if override is not None:
+                raise PolicyError("this task has no review to override")
+            return {}
+        attempts = task["evidence"].get("review_attempts")
+        if not attempts:
+            raise PolicyError("review required before approval: run trusted review")
+        record = self.store.artifact(task_id, "review.%d" % attempts)
+        if digest(record) != task["evidence"].get("review_sha256"):
+            raise PolicyError("review evidence mismatch")
+        if record.get("outcome") != "completed":
+            raise PolicyError("review required before approval: latest attempt %s" % record.get("outcome"))
+        if (record.get("provider") != reviewer.PROVIDER or record.get("model_requested") != requested.get("model") or
+                record.get("model_verified") is not True):
+            raise PolicyError("review provider or model not verified")
+        if "offline-fixture" in str(record.get("cli", {}).get("version")) and not (self.test_context and context == "test"):
+            raise PolicyError("offline-fixture review requires a test task and explicit test context")
+        review = reviewer.validate_review(record.get("review"), record.get("snapshot_sha256"), record.get("patch_sha256"))
+        if record.get("blocking") is not reviewer.blocking(review):
+            raise PolicyError("review evidence mismatch")
+        gate = {"review_sha256": task["evidence"]["review_sha256"]}
+        if record["blocking"]:
+            if override is None:
+                raise PolicyError("review reported blocking findings: reject, or approve with an explicit "
+                                  "--override-review reason")
+            gate["review_override"] = override
+        elif override is not None:
+            raise PolicyError("review reported no blocking findings; nothing to override")
+        if snap is not None:
+            home = self.store.task_dir(task_id)
+            patch_sha256 = hashlib.sha256(tree_patch(home / "clone", home, snap)).hexdigest()
+            if (record.get("snapshot_sha256") != snap["sha256"] or record.get("tree") != snap["tree"] or
+                    record.get("patch_sha256") != patch_sha256):
+                raise PolicyError("review is stale: not bound to the current snapshot and patch")
+        return gate
+
+    def approve(self, task_id, snapshot_hash, founder, override_review=None):
         self.require(task_id)
         if not isinstance(founder, str) or not founder.strip() or len(founder) > 200:
             raise PolicyError("explicit founder identity required")
+        if override_review is not None and (not isinstance(override_review, str) or
+                                            not override_review.strip() or len(override_review) > 2000):
+            raise PolicyError("an explicit review override reason is required")
         with self.store.lock(task_id):
             task = self.require(task_id)
             if task["status"] != "awaiting_approval":
@@ -586,12 +644,17 @@ class TrustedEngine:
             if snapshot_hash != task["evidence"].get("snapshot_sha256"):
                 raise PolicyError("approval must name the exact snapshot hash")
             context = self.approval_context(task_id)
+            self.review_gate(task_id, context, override_review)
             try:
                 with self.guard(task_id, "approve"):
-                    self.checked(task_id)
-                approval = {"snapshot_sha256": snapshot_hash, "founder": founder, "execution_context": context}
+                    snap = self.checked(task_id)
+                    gate = self.review_gate(task_id, context, override_review, snap)
+                approval = dict(gate, snapshot_sha256=snapshot_hash, founder=founder, execution_context=context)
                 evidence = dict(task["evidence"], approval_sha256=self.store.artifact(task_id, "approval", approval))
-                self.store.transition(task_id, "approved", "Human approved exact snapshot: " + founder, evidence)
+                message = "Human approved exact snapshot: " + founder
+                if "review_override" in gate:
+                    message += "; blocking review findings overridden"
+                self.store.transition(task_id, "approved", message, evidence)
             except (Exception, KeyboardInterrupt) as exc:
                 if self.store.get(task_id)["status"] == "awaiting_approval":
                     self.store.transition(task_id, "invalidated", "Approval refused: " + str(exc))
@@ -616,16 +679,136 @@ class TrustedEngine:
                             approval.get("execution_context", "normal") != context or
                             digest(approval) != task["evidence"].get("approval_sha256")):
                         raise PolicyError("approval evidence mismatch")
+                    gate = self.review_gate(task_id, context, approval.get("review_override"), snap)
+                    if gate.get("review_sha256") != approval.get("review_sha256"):
+                        raise PolicyError("approval evidence mismatch")
                     patch = tree_patch(home / "clone", home, snap)
                     self.unchanged(task_id)
                 atomic_write(home / "export.patch", patch)
                 record = {"snapshot_sha256": snap["sha256"], "tree": snap["tree"], "execution_context": context,
                           "path": str(home / "export.patch"), "sha256": hashlib.sha256(patch).hexdigest()}
+                if "review_sha256" in gate:
+                    record["review_sha256"] = gate["review_sha256"]
                 self.store.artifact(task_id, "export", record)
             except (Exception, KeyboardInterrupt) as exc:
                 self.store.transition(task_id, "invalidated", "Export refused: " + str(exc))
                 raise
         return record
+
+    def review(self, task_id, claude_bin=None, timeout=600):
+        """One fresh Claude Code review of the verified snapshot, recorded as an opinion.
+
+        The reviewer never changes the snapshot, task state, approval or export. A
+        completed review is final; an attempt that did not complete may be retried
+        once. A snapshot or source change around the review invalidates the task.
+        """
+        self.require(task_id)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 1800:
+            raise PolicyError("review timeout must be positive and at most 1800 seconds")
+        with self.store.lock(task_id):
+            task = self.require(task_id)
+            requested = task["spec"].get("review")
+            if requested is None:
+                raise PolicyError("this task did not request a review (start it with --review-model)")
+            if task["status"] != "awaiting_approval":
+                raise PolicyError("review requires a verified task awaiting approval")
+            attempts = task["evidence"].get("review_attempts", 0)
+            if attempts and self.store.artifact(task_id, "review.%d" % attempts).get("outcome") == "completed":
+                raise PolicyError("a completed review is final")
+            if attempts >= reviewer.ATTEMPTS:
+                raise PolicyError("review attempt limit reached")
+            attempt = attempts + 1
+            record = {"attempt": attempt, "provider": reviewer.PROVIDER, "model_requested": requested["model"],
+                      "model_verified": False, "outcome": "failed", "classification": reviewer.CLASSIFICATION}
+            invalid = False
+            try:
+                with self.guard(task_id, "review_%d" % attempt):
+                    snap = self.checked(task_id)
+                    try:
+                        found = self.run_review(task_id, task, snap, attempt, record, claude_bin, timeout)
+                    finally:
+                        # Same user, not confined: detect, never assume, an unchanged snapshot.
+                        self.unchanged(task_id)
+                record.update(found, outcome="completed")
+            except (Exception, KeyboardInterrupt) as exc:
+                invalid = isinstance(exc, IntegrityError)
+                if record["outcome"] != "unavailable":
+                    record["outcome"] = "failed"
+                record["error"] = (str(exc) or type(exc).__name__)[:2000]
+            sha = self.store.artifact(task_id, "review.%d" % attempt, record)
+            message = "Claude Code review attempt %d %s" % (attempt, record["outcome"])
+            if record["outcome"] == "completed":
+                message += "; " + ("blocking findings" if record["blocking"] else "no blocking findings")
+            self.annotate(task_id, dict(task["evidence"], review_attempts=attempt, review_sha256=sha), message)
+            if invalid and self.store.get(task_id)["status"] == "awaiting_approval":
+                self.store.transition(task_id, "invalidated", "Review refused: " + record["error"])
+        return self.status(task_id)
+
+    def run_review(self, task_id, task, snap, attempt, record, claude_bin, timeout):
+        home = self.store.task_dir(task_id)
+        clone, folder = home / "clone", home / ("review-%d" % attempt)
+        if os.path.lexists(folder):
+            raise PolicyError("review folder already exists; no reuse")
+        folder.mkdir(mode=0o700)
+        # Disposable read-only input from the snapshot's Git objects, never the live clone.
+        bodies = {rel: git(clone, home, "show", snap["tree"] + ":" + rel)
+                  for rel, entry in snap["manifest"].items() if entry["type"] == "file"}
+        patch, files = tree_patch(clone, home, snap), changes(clone, home, snap)
+        data, patch_sha256 = reviewer.build_input(task_id, task["spec"]["prompt"], snap, patch, files, bodies,
+                                                  self.store.artifact(task_id, "verification"))
+        staged = folder / "input.txt"
+        atomic_write(staged, data)
+        staged.chmod(0o400)
+        record.update(snapshot_sha256=snap["sha256"], tree=snap["tree"], patch_sha256=patch_sha256,
+                      input={"path": staged.relative_to(home).as_posix(), "bytes": len(data),
+                             "sha256": hashlib.sha256(data).hexdigest()})
+        try:
+            info = reviewer.claude_info(claude_bin)
+        except (PolicyError, OSError, subprocess.SubprocessError) as exc:
+            record["outcome"] = "unavailable"
+            raise PolicyError("reviewer unavailable: " + str(exc)) from exc
+        model = task["spec"]["review"]["model"]
+        record.update(cli=info, environment=reviewer.environment_record(), argv=reviewer.argv(info["path"], model))
+        workdir = folder / "cwd"
+        workdir.mkdir(mode=0o700)
+        code = reviewer.run(info["path"], model, workdir, staged, folder, timeout,
+                            lambda: self.store.cancelled(task_id), record)
+        if read_regular(staged, reviewer.MAX_INPUT)[0] != data:
+            raise PolicyError("staged review input changed")
+        text = reviewer.parse_output(read_regular(folder / "stdout.json", reviewer.MAX_LOG)[0], record)
+        if code:
+            raise PolicyError("Claude Code exited with code %d" % code)
+        record["model_verified"] = reviewer.model_verified(model, record["models_reported"])
+        if not record["model_verified"]:
+            raise PolicyError("review model not verified: requested %s, CLI reported %s"
+                              % (model, record["models_reported"]))
+        review = reviewer.parse_review(text, snap["sha256"], patch_sha256, set(bodies) | {f["path"] for f in files})
+        return {"review": review, "blocking": reviewer.blocking(review)}
+
+    def annotate(self, task_id, evidence, message):
+        """Record review evidence while the task stays awaiting approval; no state change."""
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row["status"] != "awaiting_approval":
+                return False
+            conn.execute("UPDATE tasks SET evidence=? WHERE id=?", (canonical(evidence).decode(), task_id))
+            self.store.log(conn, task_id, row["status"], message)
+        return True
+
+    def review_summary(self, task):
+        attempts = task["evidence"].get("review_attempts", 0)
+        summary = {"required": True, "model": task["spec"]["review"]["model"], "attempts": attempts,
+                   "attempts_allowed": reviewer.ATTEMPTS}
+        if attempts:
+            record = self.store.artifact(task["id"], "review.%d" % attempts)
+            summary.update({key: record[key] for key in (
+                "outcome", "error", "models_reported", "model_verified", "snapshot_sha256", "patch_sha256",
+                "blocking", "classification") if key in record})
+            summary["cli_version"] = record.get("cli", {}).get("version")
+            if record.get("review"):
+                summary.update({key: record["review"][key] for key in ("verdict", "summary", "findings")})
+        return summary
 
     def diff(self, task_id):
         """The exact patch a human is asked to approve. Changes no task state."""
@@ -663,4 +846,6 @@ class TrustedEngine:
         task["notice"] = NOTICE
         if self.store.has_artifact(task_id, "changes"):
             task["changes"] = self.store.artifact(task_id, "changes")["files"]
+        if task["spec"].get("review") is not None:
+            task["review"] = self.review_summary(task)
         return task

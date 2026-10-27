@@ -46,15 +46,21 @@ def main(argv=None, *, test_context=False):
     start.add_argument("--base", required=True)
     start.add_argument("--task", type=Path, required=True)
     start.add_argument("--model", required=True)
-    for name in ("implement", "verify", "diff", "approve", "reject", "cancel", "export", "status"):
+    start.add_argument("--review-model", help="require an independent Claude Code review with this model")
+    for name in ("implement", "verify", "review", "diff", "approve", "reject", "cancel", "export", "status"):
         cmd = commands.add_parser(name)
         cmd.add_argument("task_id")
         if name == "implement":
             cmd.add_argument("--codex-bin")
             cmd.add_argument("--timeout", type=float, default=1200)
+        if name == "review":
+            cmd.add_argument("--claude-bin")
+            cmd.add_argument("--timeout", type=float, default=600)
         if name == "approve":
             cmd.add_argument("--snapshot", required=True)
             cmd.add_argument("--founder", required=True)
+            cmd.add_argument("--override-review", metavar="REASON",
+                             help="approve despite blocking review findings; the reason is recorded")
         if name == "reject":
             cmd.add_argument("--founder", required=True)
             cmd.add_argument("--reason", required=True)
@@ -72,11 +78,14 @@ def main(argv=None, *, test_context=False):
             trusted_engine = TrustedEngine(store, test_context=test_context)
             action = args.trusted_command
             if action == "start":
-                result = trusted_engine.start(args.repo, args.base, args.task, args.model)
+                result = trusted_engine.start(args.repo, args.base, args.task, args.model,
+                                              review_model=args.review_model)
             elif action == "implement":
                 result = trusted_engine.implement(args.task_id, args.codex_bin, args.timeout)
+            elif action == "review":
+                result = trusted_engine.review(args.task_id, args.claude_bin, args.timeout)
             elif action == "approve":
-                result = trusted_engine.approve(args.task_id, args.snapshot, args.founder)
+                result = trusted_engine.approve(args.task_id, args.snapshot, args.founder, args.override_review)
             elif action == "reject":
                 result = trusted_engine.reject(args.task_id, args.founder, args.reason)
             elif action == "diff":
@@ -87,6 +96,8 @@ def main(argv=None, *, test_context=False):
                 result = getattr(trusted_engine, action)(args.task_id)
             print(json.dumps(result, indent=2, ensure_ascii=True))
             expected = {"start": "preparing", "implement": "reviewing", "verify": "awaiting_approval"}
+            if action == "review":
+                return 0 if result.get("review", {}).get("outcome") == "completed" else 2
             return 2 if action in expected and result.get("status") != expected[action] else 0
         if hasattr(args, "task_id"):
             engine.require_confined(args.task_id)

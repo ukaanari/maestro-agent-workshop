@@ -1,8 +1,34 @@
 # Changelog
 
-Tagged pre-release: `v0.1.0-alpha` (synthetic-only). "Unreleased" describes work after it.
+Tagged pre-releases: `v0.1.0-alpha` (synthetic-only) and `v0.2.0-alpha` (Trusted Local
+MVP). "Unreleased" describes work after them.
 
-## Unreleased — Trusted Local MVP
+## Unreleased — Claude Code reviewer
+
+* Optional, review-required Trusted Local tasks (`trusted start --review-model`). New
+  `trusted review` runs one fresh, non-interactive, tool-less Claude Code process
+  (`reviewer.py`) on MAESTRO-built input (task, snapshot files, exact tree patch,
+  verification record) staged read-only from Git objects. Flags were verified against
+  `claude --help` 2.1.296. The environment is constructed, with no API keys, tokens,
+  base URLs, proxies or parent-session variables.
+* Strictly validated review JSON (verdict, summary, findings with severity, file, line,
+  observation and conclusion). It is recorded as `review.N` with the provider, CLI version,
+  requested and reported models, and snapshot, tree, patch and input hashes. The review is
+  classified as a model opinion.
+* Approval and export of review-required tasks need a completed, model-verified review
+  bound to the current snapshot and exact patch. Failed, malformed or stale reviews cannot
+  satisfy the gate. A snapshot or source change around the review invalidates the task.
+  Blocking findings need `reject` or an explicit, recorded `approve --override-review REASON`.
+  A completed review is final; one retry is allowed after an attempt that did not complete.
+  Codex-only tasks are unchanged.
+* Explicit offline `tests/fixtures/fake_claude.py`, never selected implicitly and
+  unapprovable outside test context. Nine reviewer tests; 108 offline tests in total.
+* Live reviewer pilot: Claude Code 2.1.296, Claude Pro subscription, `claude-sonnet-5-5`,
+  reviewing a byte-identical replay of the first pilot's Codex output. Snapshot
+  `836d1a8a…` and patch `2e8763b5…` were reproduced exactly. One attempt, verdict
+  `no_blocking_findings`. Approval was an automated pilot approval in test context.
+
+## v0.2.0-alpha — Trusted Local MVP
 
 * Codex now receives a constructed environment (`HOME`, `USER`, `LOGNAME`, `PATH`,
   `SHELL`, `TMPDIR`, `CODEX_HOME`) instead of the parent environment minus two keys;

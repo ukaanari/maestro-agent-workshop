@@ -60,15 +60,15 @@ flow documented below.
 | Explicit approval that must name the exact current snapshot hash | **Implemented, tested** |
 | Owned process groups, timeouts, cancellation, output limits; cleanup verifies that no live group member remains (descendants that leave the group are not covered, #2) | **Implemented, tested** |
 | Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
-| Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI, unconfined (below); there is no Claude Code reviewer yet. |
+| Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI and, optionally, a fresh tool-less Claude Code reviewer, both unconfined (below). |
 | Running a project's own test suite as verification | **Not in Confined Mode** (fixed, data-only exact-content check). Trusted Local runs an allowlisted `unittest` command in Seatbelt. |
 | Working on an existing repository | **Not in Confined Mode** (a new synthetic Git repository per task). Trusted Local clones an existing local repository at a pinned commit. |
 | Linux / Windows | **Not supported.** No isolation backend; tasks end `blocked`. |
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 99 offline tests: the original 80 listed below, plus 19 Trusted Local
-acceptance tests (with adversarial subcases). On interpreters other than macOS
+The suite has 108 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests and 9 Claude reviewer tests (with adversarial subcases). On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -105,7 +105,7 @@ It needs no network, no API keys and no installed agent CLIs. [CI](.github/workf
 
 A separate, recorded `mode: "trusted-local"` implements this flow:
 
-`isolated clone → Codex CLI → confined unittest verification → exact-hash human approval → patch export`
+`isolated clone → Codex CLI → confined unittest verification → optional fresh Claude Code review → exact-hash human approval → patch export`
 
 | Confined Mode | Trusted Local Mode |
 |---|---|
@@ -223,7 +223,71 @@ tests are adequate or honest.
 `export.patch` and its SHA-256 are stored in the task directory. Export uses the base
 and evidence trees and never applies, commits or pushes the patch. Reviewing or applying
 it is a separate human action. There is no trusted-local retry, automatic partial
-cleanup, Claude reviewer, credential inspection or sandbox-policy expansion.
+cleanup, credential inspection or sandbox-policy expansion.
+
+### Claude Code reviewer (experimental)
+
+`trusted start --review-model MODEL` makes a task review-required. After verification
+passes, `trusted review TASK_ID [--claude-bin PATH] [--timeout SECONDS]` runs one fresh,
+non-interactive Claude Code process, and approval then requires its completed review.
+Tasks started without `--review-model` behave exactly as before.
+
+* **Input.** MAESTRO builds it from the snapshot's Git objects, never from the live
+  clone: the task text, every included file with its hash, the exact tree patch, the
+  changed files and the verification record. It is staged read-only as
+  `review-N/input.txt`, hashed and sent on stdin. It contains no local paths and nothing
+  from Codex's messages or session. The review contract tells the model that all of it
+  is untrusted data.
+* **Process.** The argv is fixed, the working directory is an empty `review-N/cwd`, and
+  the environment is constructed: `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR`,
+  `CLAUDE_CONFIG_DIR` when set, plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. API
+  keys, tokens, base URLs, proxies and a parent Claude Code session's variables are
+  dropped. The official CLI uses its own subscription login; MAESTRO never reads it. The
+  timeout is 600 seconds by default (at most 1,800) and each output stream is capped at 1 MiB.
+
+  ```text
+  claude -p --output-format json --model <model> --tools "" --strict-mcp-config --safe-mode --restricted --no-chrome --disable-slash-commands --no-session-persistence --permission-mode dontAsk --system-prompt <review contract>
+  ```
+
+  Every flag was checked against `claude --help` of Claude Code 2.1.296. `--tools ""`
+  removes all built-in tools, so the reviewer cannot read beyond its input or edit
+  anything. `--safe-mode`, `--restricted` and `--strict-mcp-config` skip CLAUDE.md,
+  hooks, plugins, MCP servers and settings files. `--bare` is not used because it
+  disables subscription login. None of this is OS confinement: like Codex, the reviewer
+  process runs as your user.
+* **Output.** One JSON object: the echoed snapshot and patch hashes, a verdict
+  (`no_blocking_findings` or `changes_requested`), a summary and at most 20 findings.
+  Each finding has a severity (`blocking`, `major`, `minor`, `info`), file, line, an
+  *observation* (what the input shows) and a *conclusion* (the reviewer's judgement).
+  MAESTRO validates it strictly and verifies the model from the CLI's own `modelUsage` report.
+* **Record.** The `review.N` artifact holds the provider, CLI path and version, the
+  requested and reported models, the snapshot, tree, patch and input hashes, the exit
+  code, duration, output hashes and the validated review. `trusted status` shows the
+  latest attempt and its findings.
+* **Gate.** Approval and export require the latest attempt to be completed,
+  model-verified and bound to the current snapshot hash, tree and exact patch hash. A
+  failed, malformed, unverified or stale review cannot satisfy the gate. A snapshot or source
+  repository change around the review invalidates the task. Blocking findings refuse
+  ordinary approval: a human can `reject`, or approve with `--override-review REASON`,
+  which is recorded in the approval. A completed review is final. A second attempt is
+  allowed only after one that did not complete.
+* **Limits.** The review is a model opinion, not proof of correctness, and prompt
+  injection in reviewed files can still influence it. It never approves, exports or
+  changes the snapshot. `tests/fixtures/fake_claude.py` is an explicit offline fixture:
+  production never selects it, and its `offline-fixture` version satisfies the gate only
+  for a test task with a test-context caller.
+
+<a id="reviewer-pilot"></a>
+**Reviewer pilot (27 October 2026).** Claude Code 2.1.296, signed in with a Claude Pro
+subscription, ran with `--model claude-sonnet-5-5` and reviewed the first pilot's Codex output.
+Codex was not run again. An offline-fixture stand-in replayed the preserved Codex output
+byte for byte, and MAESTRO's capture reproduced the first pilot's snapshot (`836d1a8a…`)
+and patch (`2e8763b5…`) exactly. The review completed on its first attempt, in one turn
+of about 4 seconds. The CLI reported `claude-sonnet-5-5`, and the result, bound to both
+hashes, was `no_blocking_findings` with no findings. Approval and export then succeeded,
+and the patch applied cleanly to a fresh clone of the base. The approval was an
+automated pilot approval and is recorded as such; because of the replay label, the task
+could only be approved in test context.
 
 ## Requirements
 
