@@ -22,7 +22,8 @@ and that never hands an agent's output to a reviewer or a human without checking
 > Confined Mode runs **only deterministic, first-party fake agents**. Its real-agent
 > adapters still refuse. The separate [Trusted Local Mode](#trusted-local-mode-experimental)
 > can launch the official Codex CLI **with your user permissions**; only its verifier is
-> confined. This branch is validated offline with a fake, not with a live model.
+> confined. The automated suite runs offline with a fake Codex; one live pilot with the
+> real Codex CLI has passed on the bundled fixture ([details](#first-live-pilot)).
 > Do not use Trusted Local Mode to contain an untrusted agent.
 
 MAESTRO is an independent project. It is not affiliated with or endorsed by OpenAI or
@@ -59,11 +60,11 @@ flow documented below.
 | Explicit approval that must name the exact current snapshot hash | **Implemented, tested** |
 | Owned process groups, timeouts, cancellation, output limits; cleanup verifies that no live group member remains (descendants that leave the group are not covered, #2) | **Implemented, tested** |
 | Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
-| Real Codex CLI implementer / Claude Code reviewer adapters | **Not implemented.** Both always refuse. |
-| Running a project's own test suite as verification | **Not implemented.** Verification is a fixed, data-only exact-content check. |
-| Working on an existing repository | **Not implemented.** Each task gets a new synthetic Git repository. |
+| Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI, unconfined (below); there is no Claude Code reviewer yet. |
+| Running a project's own test suite as verification | **Not in Confined Mode** (fixed, data-only exact-content check). Trusted Local runs an allowlisted `unittest` command in Seatbelt. |
+| Working on an existing repository | **Not in Confined Mode** (a new synthetic Git repository per task). Trusted Local clones an existing local repository at a pinned commit. |
 | Linux / Windows | **Not supported.** No isolation backend; tasks end `blocked`. |
-| Token or cost metering | **Not implemented.** No model is called. |
+| Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
 The suite has 99 offline tests: the original 80 listed below, plus 19 Trusted Local
@@ -186,13 +187,20 @@ observations, not confinement of a same-user agent or a lock on the source repos
 They cannot tell your own edits from an agent's: leave the source repository untouched
 while a task is open.
 
+<a id="first-live-pilot"></a>
 **First live pilot (27 October 2026).** On the bundled fixture, the official Codex CLI
 0.164.0 with ChatGPT-subscription login and `-m gpt-6-luna` implemented `calc.add` in
 about 12 seconds, changing only `calc.py`. Six environment variable names were forwarded
-and the rest dropped. Confined verification passed, the exact snapshot was approved, and
-the exported patch passed `git apply --check` on a fresh clone of the base. The source
-repository's guard was unchanged. Codex reported usage of about 61k input tokens (mostly
-cached) and 326 output tokens; these are claims, not MAESTRO measurements.
+and the rest dropped. Confined verification passed, and the exported patch passed
+`git apply --check` on a fresh clone of the base. The source repository's guard was
+unchanged. Codex reported usage of about 61k input tokens (mostly cached) and 326 output
+tokens; these are claims, not MAESTRO measurements.
+
+The approval step in this pilot was an **automated pilot approval**: the implementing
+engineering agent ran `trusted approve` under the founder's written sprint
+authorization, and the approval record names it as such. The pilot therefore shows that
+approval is bound to the exact verified snapshot, not that a human reviewed this
+particular patch.
 
 Evidence includes tracked files and non-ignored untracked files. Ignored paths are
 reported by name only and never force-added. Included bytes, full file modes/types,

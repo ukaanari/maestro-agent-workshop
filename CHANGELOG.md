@@ -1,6 +1,6 @@
 # Changelog
 
-There are no tagged releases yet. Entries describe the default branch.
+Tagged pre-release: `v0.1.0-alpha` (synthetic-only). "Unreleased" describes work after it.
 
 ## Unreleased — Trusted Local MVP
 
@@ -13,6 +13,8 @@ There are no tagged releases yet. Entries describe the default branch.
   99 offline tests.
 * First live pilot on the fixture: Codex CLI 0.164.0, `gpt-6-luna`, subscription login;
   implement → verify → approve → export succeeded and the source repository was unchanged.
+  The pilot's approval was an automated pilot approval under the founder's sprint
+  authorization, not a human review of that patch.
 
 * Require an explicit validated model at task creation; pass `exec -m MODEL`,
   record it in the Codex artifact, and fail without fallback on model errors.
@@ -37,7 +39,7 @@ There are no tagged releases yet. Entries describe the default branch.
   versus evidence, confinement, tampering, escaped descendants and interrupted clones.
 * No live model run. Escaped-process containment (issue #2) remains explicitly unsupported.
 
-## 0.1.0-alpha (release candidate, not yet tagged)
+## 0.1.0-alpha — 2026-10-23 (pre-release, tag `v0.1.0-alpha`)
 
 First pre-release. Experimental and macOS only. **Only deterministic, synthetic agents
 run.** The Codex CLI and Claude Code adapters still always refuse.
