@@ -1,9 +1,34 @@
 # Changelog
 
-Tagged pre-releases: `v0.1.0-alpha` (synthetic-only) and `v0.2.0-alpha` (Trusted Local
-MVP). "Unreleased" describes work after them.
+Tagged pre-releases: `v0.1.0-alpha` (synthetic-only), `v0.2.0-alpha` (Trusted Local MVP)
+and `v0.3.0-alpha` (Claude Code reviewer). A section marked "unreleased" is not tagged yet.
 
-## Unreleased — Claude Code reviewer
+## v0.4.0-alpha (unreleased) — Usability MVP
+
+* `maestro.py --version` reports the release (it said `0.1.0-alpha` through `v0.3.0-alpha`).
+  A test now ties it to the newest heading in this file.
+* Explicit verification layouts for Trusted Local tasks: `trusted start` and `trusted check`
+  accept `--test-dir`, `--top-level-dir`, `--test-pattern` and up to four `--pythonpath`
+  directories, covering `src/` layouts and test packages. Only plain relative directories
+  inside the repository and a `*.py` glob are accepted; there is no command, shell or
+  interpreter option. A configured layout runs a constant first-party runner (paths as
+  separate argv items) under the unchanged Seatbelt policy, fails when no test ran, and
+  records the test counts. Directories must exist in the base snapshot, so a wrong layout
+  fails at `start`, before any agent runs. Without options the original fixed command and
+  task identity are unchanged.
+* New read-only `trusted check --repo --base [layout]`: clones the base into a temporary
+  directory, captures the snapshot a task would bind, runs the baseline verification in
+  Seatbelt and reports it. It creates no task or state root and calls no agent or model.
+* Task output now includes `next`: the suggested commands for the current state, including
+  the exact `approve` command with the snapshot hash. Advice only; nothing runs by itself.
+* `doctor` reports the Claude Code CLI version (optional; needed only for `trusted review`).
+* Offline multi-file example (`examples/project-demo/`): a synthetic `src/` layout project
+  with a meaningful failing baseline, a correct two-file change and a deliberately flawed
+  one that confined verification rejects. `make_fixture.py` accepts a fixture directory.
+* README quickstart for an existing Python repository, and documentation reconciled with
+  the published implementation (SECURITY, CONTRIBUTING, roadmap, Python 3.15 status).
+
+## v0.3.0-alpha — Claude Code reviewer
 
 * Optional, review-required Trusted Local tasks (`trusted start --review-model`). New
   `trusted review` runs one fresh, non-interactive, tool-less Claude Code process

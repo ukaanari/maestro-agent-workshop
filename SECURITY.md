@@ -1,8 +1,10 @@
 # Security policy
 
-MAESTRO is **experimental, pre-release software**. Its sandbox has been tested on a single
-macOS 26.7 arm64 host, against deterministic first-party fake agents only. Do not rely on
-it to confine untrusted or hostile code.
+MAESTRO is **experimental, pre-release software**. Its sandbox has been tested on one
+macOS 26.7 arm64 host and GitHub's macOS 26.6.2 arm64 runner, against deterministic
+first-party fake agents only. Trusted Local Mode runs the real Codex CLI and Claude Code
+**unconfined**, as your user; only its verification step is sandboxed. Do not rely on
+MAESTRO to confine untrusted or hostile code.
 
 ## Reporting a vulnerability
 
@@ -20,8 +22,8 @@ Please include:
   personal paths, no external network).
 
 This is a single-maintainer project with no service-level commitment. The maintainer
-will try to acknowledge reports within 7 days. Fixes are made on the default branch,
-and there are no versioned releases yet.
+will try to acknowledge reports within 7 days. Fixes are made on the default branch.
+Tagged releases are experimental pre-releases; only the latest one is supported.
 
 ## In scope
 
@@ -33,6 +35,11 @@ and there are no versioned releases yet.
   worktree differ from what was reviewed and verified.
 * Validation bypasses in `ExecPolicy`, path handling, envelope or JSON decoding.
 * Any path by which a task runs unconfined after the isolation check fails.
+* Trusted Local: approving or exporting a patch that differs from the verified (and, when
+  required, reviewed) snapshot; a review that is stale, unverified or not bound to the
+  exact patch satisfying the approval gate; verification layout options that run anything
+  other than the fixed `unittest` runner or escape the snapshot copy; API keys, tokens or
+  other unlisted environment variables reaching Codex or Claude Code.
 
 ## Known limitations (already documented, not new findings)
 
@@ -53,6 +60,8 @@ These are listed in [P1A-SECURITY.md](P1A-SECURITY.md) and the README. Reports t
 
 ## Out of scope
 
-* Real Codex CLI or Claude Code behaviour. These adapters are disabled and always refuse.
+* The behaviour of the Codex CLI and Claude Code themselves. In Confined Mode their
+  adapters are disabled and always refuse; in Trusted Local Mode they run unconfined by
+  design, so what they do with your permissions is not a MAESTRO vulnerability.
 * Non-macOS platforms. There is no isolation backend there, and tasks end `blocked` by
   design.

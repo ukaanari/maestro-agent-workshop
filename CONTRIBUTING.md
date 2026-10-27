@@ -5,19 +5,22 @@ below exist to keep its guarantees checkable.
 
 ## Before you start
 
-* For anything beyond a small fix, please open an issue first. The next phase (real agent
-  adapters, P1-B) depends on design decisions listed in [docs/ROADMAP.md](docs/ROADMAP.md),
-  and changes that pre-empt those decisions are unlikely to be merged.
+* For anything beyond a small fix, please open an issue first. Running real agents inside
+  the sandbox (P1-B) depends on design decisions listed in [docs/ROADMAP.md](docs/ROADMAP.md),
+  and changes that pre-empt those decisions are unlikely to be merged. Trusted Local
+  improvements must keep its approval, review and verification gates intact.
 * Security vulnerabilities go through [SECURITY.md](SECURITY.md), not public issues.
 
 ## Development setup
 
-macOS, Python 3.9+, Git 2.42+. There is nothing to install.
+macOS, Python 3.9+, Git 2.42+. There is nothing to install. Use `/usr/bin/python3`: the
+Trusted Local tests skip on any other interpreter.
 
 ```sh
-python3 maestro.py doctor      # read-only check of your machine
-python3 -m unittest discover -s tests -v
-python3 examples/demo.py
+/usr/bin/python3 -B maestro.py doctor                                   # read-only check
+/usr/bin/python3 -B .github/scripts/check_suite.py --known-failures ""   # the full suite, as CI runs it
+/usr/bin/python3 -B examples/demo.py                                    # Confined Mode demo
+/usr/bin/python3 -B examples/project-demo/demo.py                       # Trusted Local, fake agents
 ```
 
 The full suite must pass on macOS before a change can be merged. CI

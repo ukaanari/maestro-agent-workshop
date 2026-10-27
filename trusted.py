@@ -42,8 +42,71 @@ def validate_model(model):
     return model
 
 
-def verification_command():
-    return [python_runtime()[0], "-I", "-B", "-m", "unittest", "discover", "-s", "tests"]
+SAFE_DIR = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
+SAFE_PATTERN = re.compile(r"[A-Za-z0-9_*?][A-Za-z0-9_.*?-]*\.py")
+# A fixed program, never built from configuration: validated paths arrive as separate
+# argv items. It reports counts on stdout and fails when no test ran.
+VERIFY_RUNNER = (
+    "import json, os, sys, unittest\n"
+    "i = sys.argv.index('--')\n"
+    "sys.path[:0] = [os.path.abspath(p) for p in sys.argv[1:i]]\n"
+    "r = unittest.main(module=None, argv=['python -m unittest', 'discover'] + sys.argv[i + 1:], exit=False).result\n"
+    "print(json.dumps({'tests_run': r.testsRun, 'failures': len(r.failures), 'errors': len(r.errors),"
+    " 'skipped': len(r.skipped)}))\n"
+    "if not r.testsRun:\n"
+    "    print('MAESTRO: no tests ran', file=sys.stderr)\n"
+    "sys.exit(0 if r.wasSuccessful() and r.testsRun else 1)\n")
+
+
+def verify_config(test_dir=None, top_level_dir=None, pattern=None, pythonpath=None):
+    """Explicit unittest layout options; None when none is given (the original fixed command).
+
+    Only relative, plain directory names inside the snapshot and a *.py glob are accepted.
+    There is no command, shell or interpreter option to configure.
+    """
+    if test_dir is None and top_level_dir is None and pattern is None and not pythonpath:
+        return None
+    test_dir = "tests" if test_dir is None else test_dir
+    pattern = "test*.py" if pattern is None else pattern
+    if not isinstance(pythonpath or [], (list, tuple)):
+        raise PolicyError("pythonpath must be a list of directories")
+    pythonpath = list(pythonpath or [])
+    for name in [test_dir] + pythonpath + ([] if top_level_dir in (None, ".") else [top_level_dir]):
+        if not isinstance(name, str) or len(name) > 200 or SAFE_DIR.fullmatch(name) is None:
+            raise PolicyError("verification directories must be relative plain paths inside the "
+                              "repository: %r" % (name,))
+    if not isinstance(pattern, str) or len(pattern) > 100 or SAFE_PATTERN.fullmatch(pattern) is None:
+        raise PolicyError("test pattern must be a simple *.py file glob: %r" % (pattern,))
+    if len(pythonpath) > 4 or len(set(pythonpath)) != len(pythonpath):
+        raise PolicyError("at most four distinct --pythonpath directories")
+    if top_level_dir not in (None, ".") and not (test_dir + "/").startswith(top_level_dir + "/"):
+        raise PolicyError("the test directory must be inside the top-level directory")
+    return {"test_dir": test_dir, "top_level_dir": top_level_dir, "pattern": pattern, "pythonpath": pythonpath}
+
+
+def verification_command(config=None):
+    if config is None:
+        return [python_runtime()[0], "-I", "-B", "-m", "unittest", "discover", "-s", "tests"]
+    try:
+        valid = (isinstance(config, dict) and set(config) == {"test_dir", "top_level_dir", "pattern", "pythonpath"} and
+                 verify_config(**config) == config)
+    except PolicyError as exc:
+        raise PolicyError("unsupported verification configuration: " + str(exc)) from exc
+    if not valid:
+        raise PolicyError("unsupported verification configuration")
+    args = ["-s", config["test_dir"], "-p", config["pattern"]]
+    if config["top_level_dir"] is not None:
+        args += ["-t", config["top_level_dir"]]
+    return [python_runtime()[0], "-I", "-B", "-c", VERIFY_RUNNER, *config["pythonpath"], "--", *args]
+
+
+def verification_dirs(snap, config):
+    """Configured directories must exist in the exact snapshot being verified."""
+    if config is None:
+        return
+    for name in [config["test_dir"]] + config["pythonpath"] + [config["top_level_dir"] or "."]:
+        if snap["manifest"].get(name, {}).get("type") != "directory":
+            raise PolicyError("verification directory missing from the snapshot: " + name)
 
 
 def git(cwd, home, *args, index=None, cancelled=lambda: False):
@@ -245,6 +308,91 @@ def changes(clone, home, snap):
     return [{"status": s, "path": safe_name(p)} for s, p in zip(parts[0::2], parts[1::2])]
 
 
+def materialize(clone, home, snap, copy):
+    """Only the snapshot's included set, from the evidence tree, with recorded modes."""
+    copy.mkdir(mode=0o700)
+    directories = []
+    for rel, entry in snap["manifest"].items():
+        if entry["type"] == "directory":
+            path = copy if rel == "." else copy / rel
+            path.mkdir(parents=True, exist_ok=True)
+            directories.append((path, entry["mode"]))
+        else:
+            path = copy / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            blob = git(clone, home, "show", snap["tree"] + ":" + rel)
+            path.write_bytes(blob)
+            path.chmod(stat.S_IMODE(entry["mode"]))
+    for path, mode in sorted(directories, key=lambda p: len(p[0].parts), reverse=True):
+        path.chmod(stat.S_IMODE(mode))
+    return copy
+
+
+def confined_verify(home, copy, command, cancelled=lambda: False):
+    """The derived argv under the unchanged Seatbelt policy; a nonzero exit raises PolicyError."""
+    executable, prefix = python_runtime()
+    runner = Seatbelt([str(home)], protected=[str(home / "clone")], allowed_executables=[executable])
+    policy = ExecPolicy(executable, tuple(command[1:]), str(copy), str(copy), (str(copy),),
+                        readable=(prefix,), timeout=60, max_output=1048576)
+    return runner.run(policy, cancelled=cancelled)
+
+
+def runner_summary(output):
+    """The fixed runner's count line. Informational only: the exit status decides."""
+    lines = output.decode("utf-8", "replace").strip().splitlines()
+    try:
+        value = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    keys = {"tests_run", "failures", "errors", "skipped"}
+    if not isinstance(value, dict) or set(value) != keys or any(type(value[k]) is not int for k in keys):
+        return None
+    return value
+
+
+def check(repo, base, verify=None):
+    """Read-only compatibility check: no task, state, agent or model.
+
+    Clones the base into a private temporary directory, captures the snapshot a task
+    would bind and runs the configured verification on it under Seatbelt. Before an
+    implementation a failing baseline can be expected; a snapshot or setup error cannot.
+    """
+    command = verification_command(verify)
+    if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
+        raise PolicyError("trusted-local requires macOS and /usr/bin/python3 (Python 3.9)")
+    repo = Path(repo).resolve()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base):
+        raise PolicyError("base must be a full lowercase commit SHA")
+    with tempfile.TemporaryDirectory(prefix="maestro-check-") as temp:
+        home = Path(os.path.realpath(temp))
+        before = source_guard(repo, home)
+        clone = home / "clone"
+        git(home, home, "clone", "--no-hardlinks", "--no-checkout", "--template=", str(repo), str(clone))
+        git(clone, home, "checkout", "--detach", base)
+        git(clone, home, "remote", "remove", "origin")
+        clone_config(clone)
+        snap = snapshot(clone, home, base)
+        verification_dirs(snap, verify)
+        report = {"compatible": False, "repo": str(repo), "base": base, "snapshot_sha256": snap["sha256"],
+                  "files": sum(e["type"] == "file" for e in snap["manifest"].values()),
+                  "ignored_paths": len(snap["ignored"]), "verify": verify, "command": command}
+        output = None
+        try:
+            output = confined_verify(home, materialize(clone, home, snap, home / "verify"), command)
+            report["baseline"] = {"passed": True, "exit_code": 0}
+        except PolicyError as exc:
+            match = re.search(r"child exited with code (-?\d+):", str(exc))
+            if match is None:
+                raise  # a sandbox or setup failure, not a test result
+            report["baseline"] = {"passed": False, "exit_code": int(match.group(1)), "excerpt": str(exc)[:2000]}
+        if output is not None and verify is not None:
+            report["baseline"]["summary"] = runner_summary(output)
+        if source_guard(repo, home) != before:
+            raise IntegrityError("source repository guard changed during check")
+    report["compatible"] = True
+    return report
+
+
 def codex_info(explicit=None):
     selected = explicit or os.environ.get("MAESTRO_CODEX_BIN")
     path = shutil.which(str(selected)) if selected else shutil.which("codex")
@@ -380,10 +528,11 @@ class TrustedEngine:
             if after != expected:
                 raise IntegrityError("source repository guard changed after " + phase)
 
-    def start(self, repo, base, task_file, model, cancelled=lambda: False, review_model=None):
+    def start(self, repo, base, task_file, model, cancelled=lambda: False, review_model=None, verify=None):
         validate_model(model)
         if review_model is not None:
             validate_model(review_model)
+        command = verification_command(verify)
         if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
             raise PolicyError("trusted-local requires macOS and /usr/bin/python3 (Python 3.9)")
         repo, task_file = Path(repo).resolve(), Path(task_file).resolve()
@@ -392,10 +541,12 @@ class TrustedEngine:
         prompt = read_regular(task_file, 262144)[0].decode("utf-8")
         spec = {"mode": MODE, "model": model, "execution_context": "test" if self.test_context else "normal",
                 "repo": str(repo), "base": base, "task_file": str(task_file),
-                "prompt": prompt, "verify_command": verification_command()}
+                "prompt": prompt, "verify_command": command}
         if review_model is not None:
             # Only review-required tasks carry the key, so Codex-only task identities are unchanged.
             spec["review"] = {"provider": reviewer.PROVIDER, "model": review_model}
+        if verify is not None:
+            spec["verify"] = verify
         task_id = digest(spec)[:16]
         home = self.store.task_dir(task_id)
         # Deterministic identity deliberately refuses a second start of the same task.
@@ -420,8 +571,9 @@ class TrustedEngine:
                     if cancelled():
                         raise Cancelled("cancelled before clone promotion")
                     clone_config(partial)
-                    # Reject unsupported base content before publishing the clone.
-                    snapshot(partial, home, base)
+                    # Reject unsupported base content or a verification layout that cannot
+                    # exist before publishing the clone, and before any agent runs.
+                    verification_dirs(snapshot(partial, home, base), verify)
                     partial.rename(clone)
                 self.store.artifact(task_id, "clone_ready", {"base": base})
             except (Exception, KeyboardInterrupt) as exc:
@@ -481,22 +633,7 @@ class TrustedEngine:
         copy = home / "verify"
         if os.path.lexists(copy):
             raise PolicyError("verification copy already exists; no retry")
-        copy.mkdir(mode=0o700)
-        directories = []
-        for rel, entry in snap["manifest"].items():
-            if entry["type"] == "directory":
-                path = copy if rel == "." else copy / rel
-                path.mkdir(parents=True, exist_ok=True)
-                directories.append((path, entry["mode"]))
-            else:
-                path = copy / rel
-                path.parent.mkdir(parents=True, exist_ok=True)
-                blob = git(home / "clone", home, "show", snap["tree"] + ":" + rel)
-                path.write_bytes(blob)
-                path.chmod(stat.S_IMODE(entry["mode"]))
-        for path, mode in sorted(directories, key=lambda p: len(p[0].parts), reverse=True):
-            path.chmod(stat.S_IMODE(mode))
-        return copy
+        return materialize(home / "clone", home, snap, copy)
 
     def verify(self, task_id):
         self.require(task_id)
@@ -509,27 +646,25 @@ class TrustedEngine:
             try:
                 with self.guard(task_id, "verify"):
                     self.store.transition(task_id, "verifying", "Independent confined verification")
-                    if task["spec"].get("verify_command") != verification_command():
+                    config = task["spec"].get("verify")
+                    command = verification_command(config)
+                    if task["spec"].get("verify_command") != command:
                         raise PolicyError("unsupported verification")
                     snap = self.unchanged(task_id)
+                    verification_dirs(snap, config)
                     copy = self.build_verify(task_id, snap)
                     manifest, _ = scan(copy)
                     if digest({"base": snap["base"], "tree": snap["tree"], "manifest": manifest}) != snap["sha256"]:
                         raise PolicyError("verification copy hash differs from snapshot")
-                    executable, prefix = python_runtime()
-                    # A tiny first-party runner is unnecessary: Seatbelt runs the exact
-                    # allowlisted argv. execute reports failures as PolicyError.
-                    runner = Seatbelt([str(home)], protected=[str(home / "clone")],
-                                      allowed_executables=[executable])
-                    policy = ExecPolicy(executable, tuple(verification_command()[1:]), str(copy), str(copy),
-                                        (str(copy),), readable=(prefix,), timeout=60, max_output=1048576)
-                    record["command"] = verification_command()
+                    record["command"] = command
                     try:
-                        output = runner.run(policy, cancelled=lambda: self.store.cancelled(task_id))
+                        output = confined_verify(home, copy, command, lambda: self.store.cancelled(task_id))
                         atomic_write(home / "verification.stdout.log", output)
                         record.update(exit_code=0, passed=True,
                                       stdout={"path": "verification.stdout.log", "bytes": len(output),
                                               "sha256": hashlib.sha256(output).hexdigest()})
+                        if config is not None:
+                            record["summary"] = runner_summary(output)
                     except PolicyError as exc:
                         # Seatbelt.run exposes a bounded stderr excerpt on nonzero exit.
                         match = re.search(r"child exited with code (-?\d+):", str(exc))
@@ -555,10 +690,11 @@ class TrustedEngine:
         task = self.require(task_id)
         snap = self.unchanged(task_id)
         verification = self.store.artifact(task_id, "verification")
+        command = verification_command(task["spec"].get("verify"))
         if (verification.get("passed") is not True or verification.get("exit_code") != 0 or
                 verification.get("snapshot_sha256") != snap["sha256"] or
-                verification.get("command") != verification_command() or
-                task["spec"].get("verify_command") != verification_command() or
+                verification.get("command") != command or
+                task["spec"].get("verify_command") != command or
                 digest(verification) != task["evidence"].get("verification_sha256")):
             raise PolicyError("verification evidence is stale or unsuccessful")
         return snap
@@ -810,6 +946,27 @@ class TrustedEngine:
                 summary.update({key: record["review"][key] for key in ("verdict", "summary", "findings")})
         return summary
 
+    def next_steps(self, task):
+        """Suggested commands for the current state: advice only, never executed."""
+        tid, status = task["id"], task["status"]
+        approve = "trusted approve %s --snapshot %s --founder NAME" % (tid, task["evidence"].get("snapshot_sha256"))
+        reject = "trusted reject %s --founder NAME --reason TEXT" % tid
+        if status == "preparing":
+            return ["trusted implement %s" % tid] if self.store.has_artifact(tid, "clone_ready") else []
+        if status == "reviewing":
+            return ["trusted diff %s" % tid, "trusted verify %s" % tid]
+        if status == "awaiting_approval":
+            steps = ["trusted diff %s" % tid]
+            review = self.review_summary(task) if task["spec"].get("review") is not None else None
+            if review is not None and review.get("outcome") != "completed":
+                return steps + (["trusted review %s" % tid] if review["attempts"] < reviewer.ATTEMPTS else []) + [reject]
+            if review is not None and review.get("blocking"):
+                return steps + [reject, approve + " --override-review REASON"]
+            return steps + [approve, reject]
+        if status == "approved" and not self.store.has_artifact(tid, "export"):
+            return ["trusted export %s" % tid]
+        return []  # done, or terminal: a task is never retried; start a new one
+
     def diff(self, task_id):
         """The exact patch a human is asked to approve. Changes no task state."""
         task = self.require(task_id)
@@ -848,4 +1005,5 @@ class TrustedEngine:
             task["changes"] = self.store.artifact(task_id, "changes")["files"]
         if task["spec"].get("review") is not None:
             task["review"] = self.review_summary(task)
+        task["next"] = self.next_steps(task)
         return task

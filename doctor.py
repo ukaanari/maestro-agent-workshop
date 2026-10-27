@@ -194,14 +194,17 @@ def run_checks(root, sandbox_binary=SANDBOX_EXEC, system=None):
                       if checks[-1]["status"] == "ok" else skipped("confined_worker", "sandbox unavailable"))
         checks.append(guarded("git", check_git))
     checks.append(result("real_agents", "info", "Confined mode runs only deterministic fake agents"))
+    from reviewer import claude_info
     from trusted import NOTICE, codex_info
     checks.append(result("trusted_local", "info", NOTICE))
-    if checks[0]["status"] == "fail":
-        checks.append(skipped("codex", "unsupported platform"))
-    else:
+    # Version queries only: no login, model or network check. Claude Code is optional.
+    for name, probe, note in (("codex", codex_info, ""), ("claude", claude_info, "; needed only for trusted review")):
+        if checks[0]["status"] == "fail":
+            checks.append(skipped(name, "unsupported platform"))
+            continue
         try:
-            info = codex_info()
-            checks.append(dict(result("codex", "info", info["version"]), **info))
+            info = probe()
+            checks.append(dict(result(name, "info", info["version"]), **info))
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            checks.append(result("codex", "info", str(exc)))
+            checks.append(result(name, "info", str(exc) + note))
     return {"ok": all(c["status"] != "fail" for c in checks), "checks": checks}

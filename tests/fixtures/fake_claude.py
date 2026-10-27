@@ -31,14 +31,15 @@ if scenario == "timeout":
 if scenario == "mutate":
     # Same-user process: nothing stops this write; MAESTRO must detect it.
     (cwd.parent.parent / "clone" / "calc.py").write_text("def add(a, b):\n    return 'reviewer edit'\n")
+changed = payload["changed_files"][0]["path"] if payload["changed_files"] else None
 review = {"snapshot_sha256": payload["snapshot_sha256"], "patch_sha256": payload["patch_sha256"],
           "verdict": "no_blocking_findings", "summary": "Offline fixture review; no model was called.",
-          "findings": [{"severity": "info", "file": "calc.py", "line": 2, "title": "Fixture observation",
-                        "observation": "The patch changes calc.add.",
+          "findings": [{"severity": "info", "file": changed, "line": 2, "title": "Fixture observation",
+                        "observation": "The patch changes %s." % changed,
                         "conclusion": "Fixture only; this is not a semantic review."}]}
 if scenario == "blocking":
     review["verdict"] = "changes_requested"
-    review["findings"].append({"severity": "blocking", "file": "calc.py", "line": 2, "title": "Fixture blocker",
+    review["findings"].append({"severity": "blocking", "file": changed, "line": 2, "title": "Fixture blocker",
                                "observation": "Fixture-defined blocking finding.",
                                "conclusion": "Blocks ordinary approval in tests."})
 elif scenario == "blocking-finding-only":

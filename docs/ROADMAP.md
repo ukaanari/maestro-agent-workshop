@@ -12,8 +12,18 @@ phase by phase.
 * **P1-A: confinement layer.** Deny-default macOS Seatbelt profiles for every agent
   process, execution-policy validation, fail-closed per-launch self-test, 13 kernel-enforced
   isolation tests. See [P1A-SECURITY.md](../P1A-SECURITY.md).
+* **Continuous integration** on GitHub-hosted macOS 26 arm64 runners, with an exact
+  known-failure gate for the experimental Python 3.15 job (#7).
+* **Trusted Local Mode** (`v0.2.0-alpha`): the real Codex CLI, run unconfined, on an
+  isolated clone of an existing repository; verification by the project's `unittest`
+  suite in a confined copy of the snapshot; hash-bound approval; patch export.
+* **Claude Code reviewer** (`v0.3.0-alpha`): an optional fresh, tool-less review bound to
+  the snapshot and patch, gating approval.
+* **Usability MVP** (`v0.4.0-alpha`, unreleased): explicit verification layouts,
+  read-only `trusted check`, next-step hints, a multi-file offline project demo and a
+  quickstart.
 
-## Planned: P1-B, real agent adapters on the existing sandbox
+## Planned: P1-B, real agent adapters inside the existing sandbox
 
 Goal: one real Codex CLI implementation and one fresh, independent Claude Code review,
 run under MAESTRO's sandbox, with no manual copying between agents. The sandbox must not
@@ -60,14 +70,12 @@ the result is documented.
 
 ## Later (not yet designed in detail)
 
-* Verification by an allowlisted test command run in a separate confined copy of the
-  snapshot, replacing the exact-content check.
+* Trusted Local verification beyond the standard library: pytest and third-party test
+  dependencies, without granting personal site-packages or the network.
+* Validation on independently maintained third-party repositories.
 * Usage and session limits, only where the official CLI actually enforces them. MAESTRO
   will not claim hard token caps based on usage reported after the fact.
-* Working on existing repositories (today every task gets a new synthetic repository).
 * An isolation backend for Linux.
-* Continuous integration on macOS runners. Whether `sandbox-exec` behaves the same there
-  has not been tested.
 
 ## Explicit non-goals for now
 

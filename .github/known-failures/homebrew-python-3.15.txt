@@ -1,6 +1,6 @@
 # Exact unittest ids allowed to fail on Homebrew Python 3.15 (issue #7).
 # Inside the sandbox, importing ctypes is denied on 3.15 (os.uname()), so these two
 # process-inspection probes cannot run. Every other subTest of the same test, and the
-# test itself, must still pass. This list is a prediction that CI has not yet confirmed.
+# test itself, must still pass. CI has confirmed exactly these two on every run since the remediation.
 test_security.ConfinementTests.test_process_isolation_env_signals_and_inspection (probe='sibling_environment')
 test_security.ConfinementTests.test_process_isolation_env_signals_and_inspection (probe='parent_executable')

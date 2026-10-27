@@ -21,10 +21,13 @@ and that never hands an agent's output to a reviewer or a human without checking
 > **Status: experimental, pre-release, macOS only.**
 > Confined Mode runs **only deterministic, first-party fake agents**. Its real-agent
 > adapters still refuse. The separate [Trusted Local Mode](#trusted-local-mode-experimental)
-> can launch the official Codex CLI **with your user permissions**; only its verifier is
-> confined. The automated suite runs offline with a fake Codex; one live pilot with the
-> real Codex CLI has passed on the bundled fixture ([details](#first-live-pilot)).
+> can launch the official Codex CLI and, optionally, a tool-less Claude Code reviewer
+> **with your user permissions**; only its verifier is confined. The automated suite runs
+> offline with fake agents. Live runs have passed only on small bundled fixtures
+> ([Codex pilot](#first-live-pilot), [two-agent run](#two-agent-run)).
 > Do not use Trusted Local Mode to contain an untrusted agent.
+
+**New here?** [Quickstart: Trusted Local on your own repository](#quickstart-trusted-local-on-your-own-repository).
 
 MAESTRO is an independent project. It is not affiliated with or endorsed by OpenAI or
 Anthropic. "Codex" and "Claude Code" identify their respective tools and integrations. It
@@ -61,14 +64,15 @@ flow documented below.
 | Owned process groups, timeouts, cancellation, output limits; cleanup verifies that no live group member remains (descendants that leave the group are not covered, #2) | **Implemented, tested** |
 | Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
 | Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI and, optionally, a fresh tool-less Claude Code reviewer, both unconfined (below). |
-| Running a project's own test suite as verification | **Not in Confined Mode** (fixed, data-only exact-content check). Trusted Local runs an allowlisted `unittest` command in Seatbelt. |
+| Running a project's own test suite as verification | **Not in Confined Mode** (fixed, data-only exact-content check). Trusted Local runs the project's `unittest` suite in Seatbelt, with an explicit layout (`--test-dir`, `--top-level-dir`, `--test-pattern`, `--pythonpath`). |
 | Working on an existing repository | **Not in Confined Mode** (a new synthetic Git repository per task). Trusted Local clones an existing local repository at a pinned commit. |
 | Linux / Windows | **Not supported.** No isolation backend; tasks end `blocked`. |
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 108 offline tests: the original 80 listed below, plus 19 Trusted Local
-acceptance tests and 9 Claude reviewer tests (with adversarial subcases). On interpreters other than macOS
+The suite has 121 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests, 9 Claude reviewer tests and 13 usability tests (verification layouts,
+`trusted check`, next steps, the project demo), many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -88,18 +92,70 @@ It needs no network, no API keys and no installed agent CLIs. [CI](.github/workf
   test and subTest ids (`.github/known-failures/`), so any other regression, even
   another subTest of the same test, or a known failure that starts passing, turns it
   red. It is not a required check.
-  - **On `main`:** `doctor`, the orchestration tests and the demo pass, and 4
-    confinement tests fail. 3 of them start child processes through `sys.executable`,
+  - **Before the audit remediation:** `doctor`, the orchestration tests and the demo passed, and 4
+    confinement tests failed. 3 of them started child processes through `sys.executable`,
     which on Homebrew is a launcher that the profile does not allowlist. The 4th, the
-    process-isolation test, aborts at `import ctypes`, because `os.uname()` is denied, so
+    process-isolation test, aborted at `import ctypes`, because `os.uname()` is denied, so
     none of its probes ran.
-  - **After the audit remediation:** children start from the allowlisted interpreter
+  - **Since the audit remediation:** children start from the allowlisted interpreter
     binary, and the non-`ctypes` isolation probes run independently. Only the two
-    process-inspection probes are expected to stay failing on 3.15. **This is a
-    prediction that CI has not yet confirmed.**
+    process-inspection probes fail on 3.15, as CI has confirmed on every run since.
   - Every failure is a denial, not an escape. The profile is deliberately not widened.
     **Python 3.15 is not fully compatible.** See
     [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
+
+## Quickstart: Trusted Local on your own repository
+
+You need macOS, `/usr/bin/python3` (the Xcode Command Line Tools Python 3.9), the official
+[Codex CLI](https://github.com/openai/codex) signed in, and optionally Claude Code signed in
+for reviews. Agents use your own logins and quotas; MAESTRO never reads credentials.
+Rehearse the whole flow offline first, with fake agents on a synthetic multi-file project:
+
+```sh
+git clone https://github.com/ukaanari/maestro-agent-workshop.git && cd maestro-agent-workshop
+/usr/bin/python3 -B examples/project-demo/demo.py        # offline, no model calls
+```
+
+Then on your repository (commit your work first, and leave the repository untouched while
+a task is open):
+
+```sh
+M="/usr/bin/python3 -B $PWD/maestro.py"
+$M doctor                                                # 1-2. prerequisites; changes nothing
+REPO=/absolute/path/to/repo; BASE=$(git -C "$REPO" rev-parse HEAD)
+$M trusted check --repo "$REPO" --base "$BASE" --pythonpath src --top-level-dir .   # 3. compatibility
+$M trusted start --repo "$REPO" --base "$BASE" --task /absolute/path/TASK.md \
+   --model MODEL --pythonpath src --top-level-dir . --review-model REVIEW_MODEL     # 4. one task
+$M trusted implement TASK_ID                             # 4. one Codex run
+$M trusted verify TASK_ID                                # 5. your tests, in Seatbelt
+$M trusted review TASK_ID                                # 5. optional fresh Claude Code review
+$M trusted diff TASK_ID; $M trusted status TASK_ID       # 6. exact patch, findings, next steps
+$M trusted approve TASK_ID --snapshot SNAPSHOT_SHA256 --founder 'Your Name'   # 7. or: trusted reject
+$M trusted export TASK_ID                                # 8. patch file; you apply it yourself
+```
+
+* Use the layout options that match your project, or none for the original
+  `unittest discover -s tests` from the repository root:
+
+  | Project layout | Options |
+  |---|---|
+  | `tests/*.py` that import the code from the root | none |
+  | `src/` package, tests import it | `--pythonpath src` |
+  | `tests/` is a package (`tests/__init__.py`, relative imports) | `--top-level-dir .` |
+  | tests inside the package, e.g. `app/tests/` | `--test-dir app/tests --top-level-dir .` |
+  | files named `*_test.py` | `--test-pattern '*_test.py'` |
+
+* `trusted check` creates no task and calls no agent: it clones the base into a temporary
+  directory and runs your tests there in Seatbelt. A failing baseline is normal before
+  the change; an error means the setup cannot work. Fix the layout before spending a
+  Codex run.
+* Every command prints JSON, including `next`, the suggested commands for the current
+  state. Drop `--review-model` and `trusted review` for a Codex-only task. `MODEL` is a
+  model your Codex CLI lists (`codex debug models`); `REVIEW_MODEL` is a full Claude model
+  name such as `claude-sonnet-5-5`.
+* A compatible project has a `unittest` suite that runs on Python 3.9 with the standard
+  library (or dependencies inside the repository), in under 60 seconds, with no network
+  or subprocesses. See [Limitations](#limitations).
 
 ## Trusted Local Mode (experimental)
 
@@ -151,8 +207,8 @@ A separately authorized real Codex run uses the same commands without `--codex-b
 /usr/bin/python3 -B maestro.py --root /absolute/new-state trusted export TASK_ID
 ```
 
-`status` lists the changed files and `diff` prints the exact tree-to-tree patch under
-review, without changing task state. Instead of approving, a human can run
+`status` lists the changed files and the `next` suggested commands, and `diff` prints the
+exact tree-to-tree patch under review, without changing task state. Instead of approving, a human can run
 `trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
 or `trusted cancel TASK_ID`. Both permanently block approval and export.
 
@@ -211,7 +267,12 @@ not preserve the included bytes are refused too. Evidence uses a private index;
 it does not stage changes in the source repository.
 
 Verification materializes only the included set from the evidence tree and checks its
-hash before running exactly `python_runtime()[0] -I -B -m unittest discover -s tests`.
+hash before running exactly `python_runtime()[0] -I -B -m unittest discover -s tests`, or,
+for a task started with layout options, a constant first-party runner given the validated
+directories and glob as separate arguments (`-I -B -c <runner> [pythonpath…] -- -s DIR -p GLOB
+[-t TOP]`). Layout values are plain relative paths that must exist in the snapshot; there is
+no command, shell or interpreter option. A configured run fails when no test ran and
+records the test counts.
 The unchanged Seatbelt policy permits writes only in that disposable copy, denies
 fork/network and limits runtime to 60 seconds. Exit status and bounded stdout are
 recorded; on failure the existing runner supplies a bounded stderr excerpt. The clone
@@ -328,7 +389,7 @@ disabled. Intel Macs and other macOS major versions have not been verified.
 git clone https://github.com/ukaanari/maestro-agent-workshop.git
 cd maestro-agent-workshop
 python3 maestro.py doctor                  # read-only check of this machine
-python3 -m unittest discover -s tests -v   # 80 tests, about 23 s on the development host
+python3 -m unittest discover -s tests -v   # Trusted Local tests skip unless this is /usr/bin/python3
 python3 examples/demo.py                   # end-to-end demo in a temporary directory
 ```
 
@@ -474,7 +535,7 @@ value is an audit label typed by the operator, not authentication.
 
 ## How it works
 
-Seven small Python modules (about 1,450 lines in total):
+Nine small Python modules (about 2,800 lines in total):
 
 | Module | Responsibility |
 |---|---|
@@ -485,6 +546,8 @@ Seven small Python modules (about 1,450 lines in total):
 | `execution.py` | Owned process groups, cancellation, time and output limits |
 | `sandbox.py` | Seatbelt profile generation, execution policy validation, fail-closed self-test |
 | `agents.py` | Versioned IPC envelopes, disabled real adapters, deterministic fake worker |
+| `trusted.py` | Trusted Local mode: isolated clone, Codex CLI launch, snapshots, verification layouts, `check`, approval and export gates |
+| `reviewer.py` | Trusted Local Claude Code reviewer: fixed tool-less invocation, review input and strict output validation |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the lifecycle, trust boundaries and
 evidence chain, and [P1A-SECURITY.md](P1A-SECURITY.md) for the confinement design, what
@@ -492,12 +555,25 @@ the tests prove, and the known gaps.
 
 ## Limitations
 
-These are deliberate disclosures, not fine print.
+These are deliberate disclosures, not fine print. Trusted Local first, then Confined Mode.
 
-* **Only fake agents run.** The pipeline is proven with deterministic stand-ins that emit
-  fixed edits and fixed verdicts. The review is *not* a semantic code review. Whether the
-  real Codex CLI and Claude Code can run under MAESTRO's sandbox is **unknown and partly
-  known to conflict** (next point).
+* **Trusted Local does not confine Codex or Claude Code.** Both run as your user, with
+  your permissions and login. Only verification runs in Seatbelt. Source-repository
+  guards and snapshot checks detect changes; they do not prevent them.
+* **Trusted Local verification is narrow.** It runs the project's `unittest` suite with
+  `/usr/bin/python3` (3.9), standard library only, within 60 seconds, with no network and
+  no subprocesses. pytest-only suites, third-party test dependencies that are not inside
+  the repository, and tests that spawn processes cannot be verified yet. A passing suite
+  shows only that those tests passed.
+* **Trusted Local snapshots** refuse symlinks, submodules, nested `.git`, hardlinks,
+  special files, more than 2,000 entries and more than 20 MiB.
+* **Live evidence is small.** Real Codex and Claude Code runs have passed only on bundled
+  synthetic fixtures. The project demo is synthetic too; no third-party repository has
+  been validated end to end yet.
+* **In Confined Mode, only fake agents run.** The pipeline is proven with deterministic
+  stand-ins that emit fixed edits and fixed verdicts. The review is *not* a semantic code
+  review. Whether the real Codex CLI and Claude Code can run under MAESTRO's sandbox is
+  **unknown and partly known to conflict** (next point).
 * **Real agents do not yet fit inside the sandbox.** Codex CLI and Claude Code apply their
   own Seatbelt profiles on macOS. Inside a MAESTRO profile any nested `sandbox-exec` fails
   (`forbidden-sandbox-reinit`), so either their inner sandbox is disabled and MAESTRO's
@@ -528,8 +604,8 @@ These are deliberate disclosures, not fine print.
 * **The operator is trusted.** Hashes detect stale or corrupted evidence, not an attacker
   who can rewrite both the database and its hashes. Path checks protect normal managed use,
   not a hostile same-user process racing the filesystem.
-* **Tasks are tiny.** Each task gets one target file. Snapshots allow at most 32 files and
-  64 KiB in total.
+* **Confined tasks are tiny.** Each task gets one target file. Snapshots allow at most 32
+  files and 64 KiB in total.
 * **Few hosts were tested.** Results come from one macOS 26.7 arm64 development Mac and
   GitHub's macOS 26.6.2 arm64 runner image. The full suite passes with the Xcode Python
   only; with Homebrew Python 3.15, some confinement tests fail
@@ -537,10 +613,11 @@ These are deliberate disclosures, not fine print.
 
 ## Roadmap
 
-The next phase (P1-B) connects the real Codex CLI and Claude Code adapters to the existing
-sandbox, without weakening it. It is blocked on four design decisions: the process-escape
-fix, the nested-sandbox conflict, shells inside the sandbox, and network and credential
-access through an allowlisting proxy. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Trusted Local (unconfined agents, confined verification) is the usable path today.
+Running the real agents *inside* MAESTRO's sandbox (P1-B) is still blocked on four design
+decisions: the process-escape fix, the nested-sandbox conflict, shells inside the sandbox,
+and network and credential access through an allowlisting proxy. See
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contributing and security
 

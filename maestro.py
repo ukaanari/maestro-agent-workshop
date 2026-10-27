@@ -12,7 +12,21 @@ import doctor
 from execution import Cancelled, PolicyError
 from workflow import Engine, Store
 
-__version__ = "0.1.0-alpha"
+__version__ = "0.4.0-alpha"
+
+
+def add_verify_options(cmd):
+    group = cmd.add_argument_group("verification layout (unittest only; default: discover -s tests)")
+    group.add_argument("--test-dir", help="unittest discovery start directory, relative to the repository")
+    group.add_argument("--top-level-dir", help="unittest top-level directory, for tests that are a package")
+    group.add_argument("--test-pattern", help="test file glob, for example 'test_*.py' or '*_test.py'")
+    group.add_argument("--pythonpath", action="append", metavar="DIR",
+                       help="directory added to sys.path, for example 'src' (repeatable, at most 4)")
+
+
+def verify_options(args):
+    from trusted import verify_config
+    return verify_config(args.test_dir, args.top_level_dir, args.test_pattern, args.pythonpath)
 
 
 def main(argv=None, *, test_context=False):
@@ -47,6 +61,12 @@ def main(argv=None, *, test_context=False):
     start.add_argument("--task", type=Path, required=True)
     start.add_argument("--model", required=True)
     start.add_argument("--review-model", help="require an independent Claude Code review with this model")
+    add_verify_options(start)
+    check = commands.add_parser("check", help="read-only compatibility check of a repository; no task, "
+                                              "agent or model")
+    check.add_argument("--repo", type=Path, required=True)
+    check.add_argument("--base", required=True)
+    add_verify_options(check)
     for name in ("implement", "verify", "review", "diff", "approve", "reject", "cancel", "export", "status"):
         cmd = commands.add_parser(name)
         cmd.add_argument("task_id")
@@ -71,6 +91,11 @@ def main(argv=None, *, test_context=False):
         print(json.dumps(report, indent=2, ensure_ascii=True))
         return 0 if report["ok"] else 2
     try:
+        if args.command == "trusted" and args.trusted_command == "check":
+            # Like doctor: a compatibility check never creates or adopts a state root.
+            from trusted import check
+            print(json.dumps(check(args.repo, args.base, verify_options(args)), indent=2, ensure_ascii=True))
+            return 0
         store = Store(args.root)
         engine = Engine(store)
         if args.command == "trusted":
@@ -79,7 +104,7 @@ def main(argv=None, *, test_context=False):
             action = args.trusted_command
             if action == "start":
                 result = trusted_engine.start(args.repo, args.base, args.task, args.model,
-                                              review_model=args.review_model)
+                                              review_model=args.review_model, verify=verify_options(args))
             elif action == "implement":
                 result = trusted_engine.implement(args.task_id, args.codex_bin, args.timeout)
             elif action == "review":
@@ -94,6 +119,8 @@ def main(argv=None, *, test_context=False):
                 return 0
             else:
                 result = getattr(trusted_engine, action)(args.task_id)
+            if action in ("start", "implement", "verify", "approve", "reject", "cancel"):
+                result["next"] = trusted_engine.next_steps(result)
             print(json.dumps(result, indent=2, ensure_ascii=True))
             expected = {"start": "preparing", "implement": "reviewing", "verify": "awaiting_approval"}
             if action == "review":

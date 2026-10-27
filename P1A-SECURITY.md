@@ -197,8 +197,8 @@ disabled**), using `.github/workflows/ci.yml` with read-only permissions and no 
 
   The tests now start children from the allowlisted binary. They run the non-`ctypes`
   probes independently and report a `ctypes`-dependent probe that could not run as a
-  failure, never a pass. On 3.15, only the two process-inspection probes are expected to
-  fail. That is a prediction CI has not yet confirmed.
+  failure, never a pass. On 3.15, only the two process-inspection probes fail; CI has
+  confirmed exactly those two on every run since.
   The CI run's kernel sandbox log (diagnostics step) attributes both:
   * **Child spawns:** `file-read-metadata /opt/homebrew/opt/python@3.15` was denied
     exactly 4 times, once per Python child the failing tests start. On Homebrew,

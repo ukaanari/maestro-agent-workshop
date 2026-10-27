@@ -1,5 +1,8 @@
 #!/usr/bin/python3
-"""Create an offline fixture repo with a deterministic, fixed-identity commit."""
+"""Create an offline fixture repo with a deterministic, fixed-identity commit.
+
+Usage: make_fixture.py DESTINATION [FIXTURE_DIR]   (default: the bundled calculator fixture)
+"""
 import os
 from pathlib import Path
 import sys
@@ -8,10 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from execution import execute
 
 
-def make_fixture(destination):
+def make_fixture(destination, fixture=None):
     destination = Path(destination).resolve()
     destination.mkdir(mode=0o700)
-    fixture = Path(__file__).parent / "fixture"
+    fixture = Path(fixture) if fixture is not None else Path(__file__).parent / "fixture"
     for source in sorted(fixture.rglob("*")):
         if "__pycache__" in source.parts:
             continue
@@ -34,4 +37,4 @@ def make_fixture(destination):
 
 
 if __name__ == "__main__":
-    print(make_fixture(sys.argv[1]))
+    print(make_fixture(*sys.argv[1:3]))
