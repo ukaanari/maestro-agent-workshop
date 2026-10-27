@@ -289,6 +289,20 @@ and the patch applied cleanly to a fresh clone of the base. The approval was an
 automated pilot approval and is recorded as such; because of the replay label, the task
 could only be approved in test context.
 
+<a id="two-agent-run"></a>
+**Founder-approved two-agent run (27 October 2026).** A fresh live run on the fixture used
+the normal CLI with `--model gpt-6-luna --review-model claude-sonnet-5-5`. The first
+attempt stopped at verification. Codex announced the change but ended its turn without
+editing, so the snapshot was unchanged, the tests failed and the task ended `failed`; no
+review was spent on it. The second attempt, a new task with the same prompt, completed.
+Codex changed only `calc.py` and confined verification passed. Claude Code then completed
+one review with no findings and verdict `no_blocking_findings`, bound to snapshot
+`836d1a8a…` and patch `2e8763b5…`. The founder read the diff, the verification result and
+the review, and decided to approve. The engineering agent ran the approve command on that
+explicit instruction, and the approval record says so. The export passed
+`git apply --check` on a fresh clone and reproduced the evidence tree. The source
+repository was unchanged.
+
 ## Requirements
 
 * macOS with `/usr/bin/sandbox-exec`. It is present on current macOS, though Apple marks it

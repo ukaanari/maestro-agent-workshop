@@ -27,6 +27,12 @@ MVP). "Unreleased" describes work after them.
   reviewing a byte-identical replay of the first pilot's Codex output. Snapshot
   `836d1a8a…` and patch `2e8763b5…` were reproduced exactly. One attempt, verdict
   `no_blocking_findings`. Approval was an automated pilot approval in test context.
+* Founder-approved two-agent run on the fixture, in normal context: a live Codex
+  (`gpt-6-luna`) implementation, confined verification and a live Claude review
+  (`claude-sonnet-5-5`, `no_blocking_findings`), bound to snapshot `836d1a8a…` and patch
+  `2e8763b5…`. The founder decided the approval, and the engineering agent ran the command
+  on that instruction. An earlier attempt ended `failed` at verification because Codex
+  finished its turn without editing; no review was spent on it.
 
 ## v0.2.0-alpha — Trusted Local MVP
 
