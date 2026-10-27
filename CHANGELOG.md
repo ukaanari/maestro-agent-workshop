@@ -2,6 +2,41 @@
 
 There are no tagged releases yet. Entries describe the default branch.
 
+## Unreleased — Trusted Local MVP
+
+* Codex now receives a constructed environment (`HOME`, `USER`, `LOGNAME`, `PATH`,
+  `SHELL`, `TMPDIR`, `CODEX_HOME`) instead of the parent environment minus two keys;
+  tokens, other API keys and proxies never reach it. Forwarded names are recorded.
+* New `trusted diff` (exact tree-only patch under review), `trusted reject` (recorded,
+  terminal `rejected`) and `trusted cancel`; `status` lists changed files.
+* Trusted Local tests skip outside macOS `/usr/bin/python3` 3.9, which the mode requires.
+  99 offline tests.
+* First live pilot on the fixture: Codex CLI 0.164.0, `gpt-6-luna`, subscription login;
+  implement → verify → approve → export succeeded and the source repository was unchanged.
+
+* Require an explicit validated model at task creation; pass `exec -m MODEL`,
+  record it in the Codex artifact, and fail without fallback on model errors.
+  Exact argv and model rejection regressions bring the offline suite to 96 tests.
+
+* Fixed Codex argv now includes `exec --ignore-user-config`; `CODEX_HOME` remains
+  unchanged while both API-key variables are removed. Test 10 asserts the exact argv.
+* Offline-fixture versions cannot be approved outside explicit test tasks and an
+  in-process test caller. Normal CLI has no test bypass; test approvals/exports are
+  labeled and normal export refuses them. The offline demo uses a dedicated harness.
+* Added regression coverage for normal/legacy tasks, environment spoofing, normal CLI
+  rejection, test-only export and a simulated non-fixture version (95 offline tests).
+
+* Separate experimental `trusted` CLI and `trusted.py`: staged local clone, fixed Codex
+  exec argv, sanitized API-key environment, bounded logs, single-attempt cleanup and
+  independent verification through the existing Seatbelt runner.
+* Source-repository guards, private-index Git tree plus full-mode manifest, exact-hash
+  human approval and binary patch export. Ignored content is excluded and unsupported
+  filesystem entries are rejected. The existing confined profile and limits are unchanged.
+* Codex path/realpath/version and trust notice in doctor, deterministic offline fixture,
+  fake Codex and full CLI demo. Fourteen acceptance tests cover mode separation, claims
+  versus evidence, confinement, tampering, escaped descendants and interrupted clones.
+* No live model run. Escaped-process containment (issue #2) remains explicitly unsupported.
+
 ## 0.1.0-alpha (release candidate, not yet tagged)
 
 First pre-release. Experimental and macOS only. **Only deterministic, synthetic agents

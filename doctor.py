@@ -193,6 +193,15 @@ def run_checks(root, sandbox_binary=SANDBOX_EXEC, system=None):
         checks.append(guarded("confined_worker", check_worker, sandbox_binary)
                       if checks[-1]["status"] == "ok" else skipped("confined_worker", "sandbox unavailable"))
         checks.append(guarded("git", check_git))
-    checks.append(result("real_agents", "info", "Codex CLI and Claude Code adapters are disabled; "
-                         "only deterministic fake agents run (see docs/ROADMAP.md)"))
+    checks.append(result("real_agents", "info", "Confined mode runs only deterministic fake agents"))
+    from trusted import NOTICE, codex_info
+    checks.append(result("trusted_local", "info", NOTICE))
+    if checks[0]["status"] == "fail":
+        checks.append(skipped("codex", "unsupported platform"))
+    else:
+        try:
+            info = codex_info()
+            checks.append(dict(result("codex", "info", info["version"]), **info))
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            checks.append(result("codex", "info", str(exc)))
     return {"ok": all(c["status"] != "fail" for c in checks), "checks": checks}

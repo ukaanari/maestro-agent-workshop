@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MAESTRO P0 local CLI: only first-party fake providers can execute."""
+"""MAESTRO local CLI: confined synthetic tasks and explicit trusted-local tasks."""
 import argparse
 import json
 import os
@@ -15,7 +15,7 @@ from workflow import Engine, Store
 __version__ = "0.1.0-alpha"
 
 
-def main(argv=None):
+def main(argv=None, *, test_context=False):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
@@ -39,6 +39,25 @@ def main(argv=None):
         if name == "dispose":
             cmd.add_argument("--remove-reviewed-output", action="store_true",
                              help="also delete output that exactly matches the stored handoff")
+    trusted = sub.add_parser("trusted", help="experimental trusted-local mode")
+    commands = trusted.add_subparsers(dest="trusted_command", required=True)
+    start = commands.add_parser("start")
+    start.add_argument("--repo", type=Path, required=True)
+    start.add_argument("--base", required=True)
+    start.add_argument("--task", type=Path, required=True)
+    start.add_argument("--model", required=True)
+    for name in ("implement", "verify", "diff", "approve", "reject", "cancel", "export", "status"):
+        cmd = commands.add_parser(name)
+        cmd.add_argument("task_id")
+        if name == "implement":
+            cmd.add_argument("--codex-bin")
+            cmd.add_argument("--timeout", type=float, default=1200)
+        if name == "approve":
+            cmd.add_argument("--snapshot", required=True)
+            cmd.add_argument("--founder", required=True)
+        if name == "reject":
+            cmd.add_argument("--founder", required=True)
+            cmd.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
     if args.command == "doctor":
         # Before Store(): diagnosing a host must never create or adopt a state root.
@@ -48,6 +67,29 @@ def main(argv=None):
     try:
         store = Store(args.root)
         engine = Engine(store)
+        if args.command == "trusted":
+            from trusted import TrustedEngine
+            trusted_engine = TrustedEngine(store, test_context=test_context)
+            action = args.trusted_command
+            if action == "start":
+                result = trusted_engine.start(args.repo, args.base, args.task, args.model)
+            elif action == "implement":
+                result = trusted_engine.implement(args.task_id, args.codex_bin, args.timeout)
+            elif action == "approve":
+                result = trusted_engine.approve(args.task_id, args.snapshot, args.founder)
+            elif action == "reject":
+                result = trusted_engine.reject(args.task_id, args.founder, args.reason)
+            elif action == "diff":
+                # The exact patch under review, printed raw for human inspection.
+                sys.stdout.buffer.write(trusted_engine.diff(args.task_id))
+                return 0
+            else:
+                result = getattr(trusted_engine, action)(args.task_id)
+            print(json.dumps(result, indent=2, ensure_ascii=True))
+            expected = {"start": "preparing", "implement": "reviewing", "verify": "awaiting_approval"}
+            return 2 if action in expected and result.get("status") != expected[action] else 0
+        if hasattr(args, "task_id"):
+            engine.require_confined(args.task_id)
         if args.command == "create":
             task_id = store.create(args.title, args.file, args.content, args.scenario, args.timeout)
             result = store.get(task_id)

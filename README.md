@@ -11,21 +11,22 @@ MAESTRO runs one coding task through a fixed, auditable pipeline:
 task → implementation agent → fresh, independent review agent → deterministic verification → explicit human approval
 ```
 
-Each step's output is hash-bound to the exact files it describes. Agents run inside a
-deny-by-default macOS Seatbelt sandbox, and anything unexpected stops the task instead of
+In Confined Mode, each step's output is hash-bound to the exact files it describes. Its
+synthetic agents run inside a deny-by-default macOS Seatbelt sandbox, and anything unexpected stops the task instead of
 retrying it. The aim is a coordinator that people who are wary of handing a coding agent
 their machine can still trust: one that does not take an agent's word for what it did,
 and that never hands an agent's output to a reviewer or a human without checking it.
 
 > [!WARNING]
 > **Status: experimental, pre-release, macOS only.**
-> MAESTRO currently runs **only deterministic, first-party fake agents**. The adapters for
-> real coding agents (OpenAI Codex CLI, Anthropic Claude Code) exist as interfaces that
-> **always refuse to run**. No real Codex-to-Claude automation has been built or validated
-> yet. Do not use MAESTRO to confine untrusted code. Read [Limitations](#limitations) first.
+> Confined Mode runs **only deterministic, first-party fake agents**. Its real-agent
+> adapters still refuse. The separate [Trusted Local Mode](#trusted-local-mode-experimental)
+> can launch the official Codex CLI **with your user permissions**; only its verifier is
+> confined. This branch is validated offline with a fake, not with a live model.
+> Do not use Trusted Local Mode to contain an untrusted agent.
 
 MAESTRO is an independent project. It is not affiliated with or endorsed by OpenAI or
-Anthropic. "Codex" and "Claude Code" are named only to describe planned integrations. It
+Anthropic. "Codex" and "Claude Code" identify their respective tools and integrations. It
 is also unrelated to Netflix's Maestro workflow orchestrator and to the Maestro mobile
 UI-testing framework.
 
@@ -47,6 +48,9 @@ they approve.
 
 ## What works today
 
+The following table describes the unchanged Confined Mode. Trusted Local has a separate
+flow documented below.
+
 | Capability | Status |
 |---|---|
 | Single-attempt task lifecycle in SQLite (atomic transitions, event log, no retries, no replay after a crash) | **Implemented, tested** |
@@ -62,7 +66,10 @@ they approve.
 | Token or cost metering | **Not implemented.** No model is called. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 80 offline tests:
+The suite has 99 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests (with adversarial subcases). On interpreters other than macOS
+`/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
+itself requires:
 
 * 23 for orchestration and 13 for confinement;
 * 6 for `doctor` and 1 cleanup regression test;
@@ -92,6 +99,123 @@ It needs no network, no API keys and no installed agent CLIs. [CI](.github/workf
   - Every failure is a denial, not an escape. The profile is deliberately not widened.
     **Python 3.15 is not fully compatible.** See
     [P1A-SECURITY.md](P1A-SECURITY.md#independent-ci-verification-2026-10-23).
+
+## Trusted Local Mode (experimental)
+
+A separate, recorded `mode: "trusted-local"` implements this flow:
+
+`isolated clone → Codex CLI → confined unittest verification → exact-hash human approval → patch export`
+
+| Confined Mode | Trusted Local Mode |
+|---|---|
+| Synthetic implementer and reviewer run in Seatbelt. | Codex runs with the user's normal permissions and login environment. MAESTRO does not confine it. |
+| New synthetic worktree; fixed data-only verification. | Clone of an existing local repository at a full base commit SHA; a disposable copy runs the allowlisted unittest command in Seatbelt. |
+| Private environment; no real model call. | Constructed environment: only `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR` and `CODEX_HOME` (when set) reach Codex. API keys, tokens, proxies and every other variable are dropped; forwarded names and a dropped count are recorded, never values. The official CLI manages its own subscription login; MAESTRO never reads login files. |
+| Explicit approval binds the full confined snapshot. | Explicit approval binds SHA-256 of canonical `{base, tree, manifest}`, independent verification and source-repository guards. Agent messages are claims only. |
+| Confined task commands only. | `trusted` commands only; neither mode falls back to the other. |
+
+Use macOS and `/usr/bin/python3` (Python 3.9), with no new dependencies. The fully offline
+CLI demonstration explicitly selects `tests/fixtures/fake_codex.py` and removes its own
+temporary fixture when finished:
+
+```sh
+/usr/bin/python3 -B examples/trusted-local/demo.py
+/usr/bin/python3 -B .github/scripts/check_suite.py --known-failures ""
+```
+
+A Codex version containing `offline-fixture` cannot receive normal human approval.
+The task must have been created with recorded `execution_context: "test"`, AND the
+calling Python harness must explicitly construct `TrustedEngine(..., test_context=True)`.
+Missing context on old tasks means normal. The production CLI exposes no flag or
+environment override for this capability; importing unittest or choosing a test-like
+folder, founder name or fake binary does not enable it. Test approvals and exports
+are labeled `execution_context: "test"`; normal CLI export refuses them too.
+The disposable offline demo uses the dedicated `tests/fixtures/trusted_test_cli.py`
+harness, whose only additional capability is `maestro.main(test_context=True)`.
+This is an explicit testing convention, not protection against same-user code changes.
+
+For a retained offline fixture, run `examples/trusted-local/make_fixture.py DESTINATION`.
+It prints a deterministic base commit created with fixed identities and dates.
+The commands below use the normal CLI: with the fake, verification works but approval
+is deliberately refused. Use the disposable demo above for a complete offline test.
+A separately authorized real Codex run uses the same commands without `--codex-bin`.
+
+```sh
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted start --repo /absolute/fixture --base FULL_SHA --task /absolute/fixture/TASK.md --model test-model
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted implement TASK_ID --codex-bin /absolute/maestro/tests/fixtures/fake_codex.py
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted verify TASK_ID
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted status TASK_ID
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted diff TASK_ID
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted approve TASK_ID --snapshot EXACT_SHA256 --founder YOUR_NAME
+/usr/bin/python3 -B maestro.py --root /absolute/new-state trusted export TASK_ID
+```
+
+`status` lists the changed files and `diff` prints the exact tree-to-tree patch under
+review, without changing task state. Instead of approving, a human can run
+`trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
+or `trusted cancel TASK_ID`. Both permanently block approval and export.
+
+`--codex-bin` or `MAESTRO_CODEX_BIN` explicitly chooses a binary. Without either, the
+production path looks for `codex` and never substitutes the fake. A live run requires
+separate founder authorization. The argv is fixed:
+
+```text
+codex -a never exec -m <model> --ignore-user-config --sandbox workspace-write --json --ephemeral -C <clone> -o <task>/last-message.txt -
+```
+
+`trusted start --model NAME` is required. Names must match
+`[a-z0-9][a-z0-9._-]{0,63}` and are recorded in the task spec and Codex artifact.
+A syntactically valid but unavailable model fails with the CLI exit status; there is
+no model fallback or retry. `test-model` above is only an offline fixture label.
+The prompt goes on stdin; binary realpath and `--version` are recorded.
+`--ignore-user-config` skips `config.toml` loading on Codex 0.164.0, while the CLI
+continues to use the unchanged `CODEX_HOME` for authentication. Implement timeout
+is 1,200 seconds by default, at most 3,600. Each output stream is capped at 10 MiB.
+Nonzero exit, malformed JSON or a missing final turn event fails without retry. Cleanup
+records concern only the original process group; a `setsid`/double-fork descendant can
+survive and retain the user's permissions (issue #2 remains open).
+
+Cloning uses `--no-hardlinks --no-checkout --template=`, detached checkout and removal
+of `origin`. `clone.partial/` becomes `clone/` only after successful preparation. Failed
+partials are retained, never reused or automatically deleted; the same task identity
+(repository, base, prompt and model) cannot be started again, so change the prompt or
+model to try again. Coordinator Git ignores global/system configuration and
+uses no hooks. Source HEAD, refs, stash, staged-index digest and porcelain-v2 status
+are compared before and after every phase; differences block export. These are
+observations, not confinement of a same-user agent or a lock on the source repository.
+They cannot tell your own edits from an agent's: leave the source repository untouched
+while a task is open.
+
+**First live pilot (27 October 2026).** On the bundled fixture, the official Codex CLI
+0.164.0 with ChatGPT-subscription login and `-m gpt-6-luna` implemented `calc.add` in
+about 12 seconds, changing only `calc.py`. Six environment variable names were forwarded
+and the rest dropped. Confined verification passed, the exact snapshot was approved, and
+the exported patch passed `git apply --check` on a fresh clone of the base. The source
+repository's guard was unchanged. Codex reported usage of about 61k input tokens (mostly
+cached) and 326 output tokens; these are claims, not MAESTRO measurements.
+
+Evidence includes tracked files and non-ignored untracked files. Ignored paths are
+reported by name only and never force-added. Included bytes, full file modes/types,
+and directories (including empty directories and the clone root) are bound by the
+manifest and Git tree. Submodules, `.gitmodules`, nested `.git`, symlinks, special files,
+hardlinks, more than 2,000 entries or 20 MiB are refused. Git transformations that do
+not preserve the included bytes are refused too. Evidence uses a private index;
+it does not stage changes in the source repository.
+
+Verification materializes only the included set from the evidence tree and checks its
+hash before running exactly `python_runtime()[0] -I -B -m unittest discover -s tests`.
+The unchanged Seatbelt policy permits writes only in that disposable copy, denies
+fork/network and limits runtime to 60 seconds. Exit status and bounded stdout are
+recorded; on failure the existing runner supplies a bounded stderr excerpt. The clone
+is re-snapshotted afterwards, again at approval, and again at export. A later write
+invalidates pending approval; an already exported patch still represents its recorded
+tree, not subsequent live files. Verification is not a proof that arbitrary project
+tests are adequate or honest.
+
+`export.patch` and its SHA-256 are stored in the task directory. Export uses the base
+and evidence trees and never applies, commits or pushes the patch. Reviewing or applying
+it is a separate human action. There is no trusted-local retry, automatic partial
+cleanup, Claude reviewer, credential inspection or sandbox-policy expansion.
 
 ## Requirements
 

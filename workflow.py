@@ -20,7 +20,7 @@ ACTIVE = {"preparing", "implementing", "reviewing", "verifying"}
 NEXT = {"created": "preparing", "preparing": "implementing",
         "implementing": "reviewing", "reviewing": "verifying",
         "verifying": "awaiting_approval", "awaiting_approval": "approved"}
-FAILURES = {"failed", "blocked", "timed_out", "cancelled", "interrupted", "review_failed"}
+FAILURES = {"failed", "blocked", "timed_out", "cancelled", "interrupted", "review_failed", "rejected"}
 
 
 class Store:
@@ -191,7 +191,12 @@ class Engine:
         self.store = store
         self.sandbox_binary = sandbox_binary
 
+    def require_confined(self, task_id):
+        if self.store.get(task_id)["spec"].get("mode") != "fake-only":
+            raise PolicyError("confined commands require mode fake-only")
+
     def workspace(self, task_id):
+        self.require_confined(task_id)
         return Workspace(self.store.task_dir(task_id))
 
     def sandbox(self, task_id):
@@ -204,6 +209,7 @@ class Engine:
                         allowed_executables=[python_runtime()[0]], binary=self.sandbox_binary)
 
     def run(self, task_id):
+        self.require_confined(task_id)
         s = self.store
         with s.lock(task_id):
             task = s.get(task_id)
@@ -287,6 +293,7 @@ class Engine:
         self.store.transition(task_id, state, reason)
 
     def check_evidence(self, task_id):
+        self.require_confined(task_id)
         try:
             return self._check_evidence(task_id)
         except (TypeError, AttributeError, KeyError) as exc:
@@ -315,6 +322,7 @@ class Engine:
         return sha
 
     def approve(self, task_id, snapshot, founder):
+        self.require_confined(task_id)
         if not founder.strip() or len(founder) > 200:
             raise PolicyError("explicit founder identity required")
         s = self.store
@@ -332,6 +340,7 @@ class Engine:
         return s.get(task_id)
 
     def recover(self, task_id):
+        self.require_confined(task_id)
         with self.store.lock(task_id):
             if self.store.get(task_id)["status"] not in ACTIVE:
                 raise PolicyError("only an abandoned active task can be recovered")
@@ -345,6 +354,7 @@ class Engine:
         output is deleted too, but only if it is exactly the stored, hash-verified
         handoff snapshot, whose full file contents stay in SQLite.
         """
+        self.require_confined(task_id)
         with self.store.lock(task_id):
             task = self.store.get(task_id)
             if task["status"] in ACTIVE | {"created", "awaiting_approval"}:
