@@ -74,3 +74,32 @@ jobs:
             | grep -iE 'Sandbox: [^ ]*python[^ ]*\([0-9]+\) deny\(' \
             | grep -vE 'maestro-(sandbox-probe|p1a-tests)-|kern\.procargs2\.' \
             | sed -E 's/^.*Sandbox: //; s/\([0-9]+\)//g' | sort | uniq -c | sort -rn | head -150 || true
+
+  # Offline privacy guard: high-confidence secrets, personal identifiers and forbidden
+  # paths in tracked files and in the commits this push or pull request adds. It runs
+  # after the push, so it cannot un-publish a value; the local hooks and GitHub push
+  # protection act earlier. See CONTRIBUTING.md.
+  privacy:
+    name: privacy guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Tracked files
+        run: python3 -B .github/scripts/privacy_scan.py tracked
+
+      - name: New commits (content, messages, author and committer emails)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          TIP: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -n "$BASE" ] && ! printf '%s' "$BASE" | grep -qE '^0+$' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            python3 -B .github/scripts/privacy_scan.py commits "$BASE..$TIP"
+          else
+            echo "No base commit to compare; the tracked-file scan above still applies."
+          fi

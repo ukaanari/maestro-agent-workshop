@@ -6,6 +6,16 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Privacy guard for the public repository:
+  * new `.github/scripts/privacy_scan.py`, standard library and offline;
+  * local pre-commit and pre-push hooks (`privacy_scan.py install`);
+  * an offline `privacy guard` CI job;
+  * stricter `.gitignore` entries for secrets, credentials, databases, evidence, agent
+    transcripts, logs and temporary test directories.
+
+  It blocks high-confidence secrets, personal identifiers and forbidden paths in staged
+  blobs, pushed commits (content, messages and identities) and tracked files, and never
+  prints a matched value. 10 tests; an audit of the published history found nothing.
 * Experimental scoped review context (`trusted start --review-context scoped`, optional
   `--review-budget`). It sends the reviewer the changed files in full, the exact patch and
   related files selected by a deterministic Python import/test graph adapted from the

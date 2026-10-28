@@ -53,6 +53,52 @@ tasks end `blocked` by design.
 7. **Keep changes small and readable.** Match the existing style: short modules, explicit
    checks, comments that explain *why*.
 
+## Privacy guard
+
+This repository is public. `.github/scripts/privacy_scan.py` (standard library, offline)
+blocks three kinds of content:
+
+* **High-confidence secrets:** private keys; AWS, GitHub, Anthropic, OpenAI, Slack, Google
+  and Stripe tokens; JWTs; credentials in non-local URLs; and high-entropy values
+  assigned to secret-like names.
+* **Personal identifiers:** absolute home paths, email addresses outside example and
+  noreply domains, and commit author or committer emails that are not a noreply address.
+* **Paths that must never be tracked:** `.env` files (`.env.example` is fine), keys and
+  certificates, credential files, SQLite and MAESTRO state, task workspaces, frozen
+  evidence, agent transcripts, logs and temporary test directories.
+
+It scans what Git records (staged blobs, the commits being pushed, tracked files), never
+the working copy, and it never prints a matched value. Test canaries and placeholder
+samples (`example`, `sentinel`, `canary`, localhost URLs) are accepted.
+
+Install the local hooks once per clone:
+
+```sh
+/usr/bin/python3 -B .github/scripts/privacy_scan.py install
+```
+
+* **pre-commit** runs `staged`.
+* **pre-push** runs `push`, which checks every commit being pushed, including content that
+  a later commit removed, plus the commit identities.
+* **Private terms:** put private project names or personal terms in
+  `.git/info/privacy-denylist`, one per line, case-insensitive. Git never commits that
+  file, so CI does not know these terms.
+
+Limits:
+
+* `git commit --no-verify` and `git push --no-verify` skip the hooks, and cloning does not
+  install them.
+* The `privacy guard` CI job runs after a push and cannot un-publish anything. If a secret
+  reaches GitHub, revoke and rotate it first; deleting the commit does not make it safe.
+* Detection is pattern-based. Unknown token formats, values split across lines or encoded
+  are missed, and binary files are checked by path only.
+* `privacy-scan: allow` on a line skips the content rules for that line. Use it only for
+  deliberate public examples; reviewers should treat it like any other change.
+
+GitHub secret scanning and push protection add a server-side layer for supported token
+formats, even when the local hooks are bypassed. Both were enabled for this repository
+when checked through the GitHub API on 2026-10-29.
+
 ## Licensing of contributions
 
 MAESTRO is licensed under the Apache License 2.0. Unless you state otherwise, any

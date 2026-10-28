@@ -109,7 +109,8 @@ class TrustedLocalAcceptanceTests(unittest.TestCase):
     def test_01_existing_eighty_tests_remain_in_full_suite(self):
         count = 0
         for path in sorted((ROOT / "tests").glob("test_*.py")):
-            if path.name in (Path(__file__).name, "test_trusted_review.py", "test_usability.py", "test_scoped_review.py"):
+            if path.name in (Path(__file__).name, "test_trusted_review.py", "test_usability.py", "test_scoped_review.py",
+                             "test_privacy_scan.py"):
                 continue
             count += unittest.defaultTestLoader.loadTestsFromName(path.stem).countTestCases()
         self.assertEqual(count, 80)
