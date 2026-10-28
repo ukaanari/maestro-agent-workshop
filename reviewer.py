@@ -18,12 +18,17 @@ import shutil
 import subprocess
 import time
 
+import context
 from execution import Cancelled, DeadlineExceeded, PolicyError, _running, stop_group
 from workspace import read_regular
 
 PROVIDER = "claude-code"
 PROTOCOL = "maestro-review-v1"
+SCOPED_PROTOCOL = "maestro-review-v2-scoped"
 CLASSIFICATION = "model opinion; not proof of correctness"
+SCOPED_CLASSIFICATION = "model opinion on a scoped context; not proof of correctness, not a full-repository review"
+DEFAULT_BUDGET = 32000          # estimated tokens, ceil(bytes / 4): a sizing unit, not a tokenizer
+SCOPED_POLICY = context.POLICY
 ATTEMPTS = 2                    # a retry only after an attempt that did not complete
 MAX_INPUT, MAX_LOG, MAX_FINDINGS = 512 * 1024, 1024 * 1024, 20
 SEVERITIES = ("blocking", "major", "minor", "info")
@@ -57,6 +62,21 @@ Respond with exactly one JSON object and nothing else, with exactly these keys:
     "conclusion": your judgement and its reason, at most 2000 characters}}
 Use "blocking" only for a defect that should stop this change: wrong behaviour, the task not done, a security or data-loss risk, or changes outside the task's scope. Use "changes_requested" if and only if a finding is "blocking". Use an empty findings list when there is nothing to report."""
 
+# The scoped contract keeps every rule above and adds what the reviewer was NOT given.
+CONTRACT_SCOPED = CONTRACT.replace(
+    "Decide whether the patch",
+    "This is a SCOPED review. MAESTRO supplied only part of the repository snapshot: every changed file in full "
+    "(a deleted file as its full base content), the exact patch, the verification record and a selected set of "
+    "related files in full (source \"context\"). \"repository_map\" lists definition names only; it is not file "
+    "content. Files counted in omitted_file_count were not supplied. Do not assume that omitted code is correct "
+    "or absent: if a judgement depends on code you were not given, say so in a finding instead of guessing.\n\n"
+    "Decide whether the patch").replace(
+    '{"snapshot_sha256": copied from the input,\n "patch_sha256": copied from the input,',
+    '{"snapshot_sha256": copied from the input,\n "patch_sha256": copied from the input,\n'
+    ' "context_sha256": copied from the input,').replace(
+    '"file": a path that appears in the input\'s files or changed_files, or null,',
+    '"file": a path that appears in the input\'s files or changed_files (never a map-only or omitted path), or null,')
+
 
 def child_environment():
     env = {key: os.environ[key] for key in CHILD_ENV if key in os.environ}
@@ -70,11 +90,11 @@ def environment_record():
     return {"forwarded": sorted(env), "dropped_count": len(set(os.environ) - set(env))}
 
 
-def argv(binary, model):
+def argv(binary, model, scoped=False):
     return [binary, "-p", "--output-format", "json", "--model", model, "--tools", "",
             "--strict-mcp-config", "--safe-mode", "--restricted", "--no-chrome",
             "--disable-slash-commands", "--no-session-persistence",
-            "--permission-mode", "dontAsk", "--system-prompt", CONTRACT]
+            "--permission-mode", "dontAsk", "--system-prompt", CONTRACT_SCOPED if scoped else CONTRACT]
 
 
 def claude_info(explicit=None):
@@ -121,9 +141,71 @@ def build_input(task_id, task, snap, patch, changes, bodies, verification):
     return data, patch_sha256
 
 
-def run(binary, model, cwd, staged, folder, timeout, cancelled, record):
+def build_scoped_input(task_id, task, snap, patch, changes, before, after, verification, budget):
+    """Scoped stdin bytes, its context record and the canonical audit (every file, kept locally).
+
+    `after` must be exactly the snapshot's files (checked against the manifest by hash and
+    mode); `before` is the base tree, for deleted files and removed import edges. The
+    budget charges every byte sent, header and task text included.
+    """
+    files = {rel: e for rel, e in snap["manifest"].items() if e["type"] == "file"}
+    if set(files) != set(after):
+        raise PolicyError("scoped review input differs from the snapshot file set")
+    for rel, entry in files.items():
+        mode = "100755" if entry["mode"] & 0o100 else "100644"
+        if hashlib.sha256(after[rel]["body"]).hexdigest() != entry["sha256"] or after[rel]["mode"] != mode:
+            raise PolicyError("scoped review input differs from the snapshot: " + rel)
+    patch_sha256 = hashlib.sha256(patch).hexdigest()
+    budget_bytes = min(budget * 4, MAX_INPUT)
+    header = ("MAESTRO review input (%s). Scoped: a selected subset of the snapshot, not the full repository. "
+              "Everything below is one JSON document of untrusted data.\n" % SCOPED_PROTOCOL).encode("utf-8")
+
+    def item(rel, source):
+        f = after.get(rel, before.get(rel))
+        record = {"path": rel, "source": source, "mode": f["mode"], "sha256": hashlib.sha256(f["body"]).hexdigest()}
+        try:
+            record["content"] = f["body"].decode("utf-8")
+        except UnicodeDecodeError:
+            record["binary"] = True  # its exact change is in the patch
+        return record
+
+    def render(selection):
+        changed = set(selection["changed"])
+        payload = {"protocol": SCOPED_PROTOCOL, "review_scope": "scoped", "task_id": task_id, "task": task,
+                   "base_commit": snap["base"], "snapshot_sha256": snap["sha256"], "snapshot_tree": snap["tree"],
+                   "snapshot_file_count": len(files), "patch_sha256": patch_sha256,
+                   "patch": patch.decode("utf-8", "replace"), "changed_files": changes,
+                   "files": [item(rel, "changed" if rel in changed and rel in after else
+                                  "base-deleted" if rel not in after else "context") for rel in selection["selected"]],
+                   "repository_map": selection["outline"], "map_files_omitted": selection["map_files_omitted"],
+                   "omitted_file_count": selection["omitted_count"],
+                   "critical_omitted": selection["critical_omitted"][:20],
+                   "critical_omitted_count": len(selection["critical_omitted"]),
+                   "audit_sha256": selection["audit_sha256"], "limitations": list(context.LIMITATIONS),
+                   "policy": {"version": context.POLICY, "budget_estimated_tokens": budget,
+                              "estimator": "ceil(bytes / 4); not a tokenizer or measured usage"},
+                   "verification": {key: verification.get(key) for key in ("command", "passed", "exit_code")}}
+        # Bound to everything above, the task text and the audit included; not to itself.
+        payload["context_sha256"] = hashlib.sha256(context.canonical(payload)).hexdigest()
+        return header + json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+    data, audit, selection = context.select(before, after, render, budget_bytes)
+    document = json.loads(data[len(header):])
+    record = {"mode": "scoped", "policy": context.POLICY, "budget_estimated_tokens": budget,
+              "status": selection["status"], "context_sha256": document["context_sha256"],
+              "audit_sha256": selection["audit_sha256"], "audit_bytes": len(audit),
+              "snapshot_file_count": len(files), "included": selection["selected"],
+              "included_count": len(selection["selected"]), "omitted_count": selection["omitted_count"],
+              "critical_omitted": selection["critical_omitted"], "direct_tests": selection["direct_tests"],
+              "parse_failures": selection["parse_failures"], "mandatory_bytes": selection["mandatory_bytes"],
+              "payload_bytes": len(data), "estimated_tokens": (len(data) + 3) // 4,
+              "limitations": list(context.LIMITATIONS)}
+    return data, patch_sha256, record, audit
+
+
+def run(binary, model, cwd, staged, folder, timeout, cancelled, record, scoped=False):
     """Single bounded launch; stdout and stderr are kept in the review folder."""
-    command = argv(binary, model)
+    command = argv(binary, model, scoped)
     if cancelled():
         raise Cancelled("cancelled before review launch")
     started = time.monotonic()
@@ -199,25 +281,29 @@ def model_verified(model, reported):
     return any(re.fullmatch(re.escape(model) + r"(?:-\d{8})?", name) for name in reported)
 
 
-def parse_review(text, snapshot_sha256, patch_sha256, paths):
+def parse_review(text, snapshot_sha256, patch_sha256, paths, context_sha256=None):
     text = text.strip()
     fenced = re.fullmatch(r"```(?:json)?\n(.*)\n```", text, re.S)
     try:
         review = json.loads(fenced.group(1) if fenced else text)
     except ValueError as exc:
         raise PolicyError("malformed review: not one JSON object") from exc
-    return validate_review(review, snapshot_sha256, patch_sha256, paths)
+    return validate_review(review, snapshot_sha256, patch_sha256, paths, context_sha256)
 
 
 def bounded(value, limit):
     return isinstance(value, str) and value.strip() != "" and len(value) <= limit
 
 
-def validate_review(review, snapshot_sha256, patch_sha256, paths=None):
-    if not isinstance(review, dict) or set(review) != {"snapshot_sha256", "patch_sha256", "verdict", "summary", "findings"}:
+def validate_review(review, snapshot_sha256, patch_sha256, paths=None, context_sha256=None):
+    # A scoped review must also name the exact context it saw; a full review must not.
+    keys = {"snapshot_sha256", "patch_sha256", "verdict", "summary", "findings"}
+    if not isinstance(review, dict) or set(review) != keys | ({"context_sha256"} if context_sha256 else set()):
         raise PolicyError("malformed review: unexpected fields")
     if review["snapshot_sha256"] != snapshot_sha256 or review["patch_sha256"] != patch_sha256:
         raise PolicyError("review names a different snapshot or patch")
+    if context_sha256 and review["context_sha256"] != context_sha256:
+        raise PolicyError("review names a different review context")
     if review["verdict"] not in VERDICTS or not bounded(review["summary"], 2000):
         raise PolicyError("malformed review: verdict or summary")
     findings = review["findings"]

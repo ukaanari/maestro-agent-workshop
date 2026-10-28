@@ -70,9 +70,10 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 122 offline tests: the original 80 listed below, plus 19 Trusted Local
-acceptance tests, 9 Claude reviewer tests and 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), many with adversarial subcases. On interpreters other than macOS
+The suite has 131 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests, 9 Claude reviewer tests, 14 usability tests (verification layouts,
+`trusted check`, next steps, the project demo) and 9 scoped-review tests, many with
+adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -339,6 +340,41 @@ Tasks started without `--review-model` behave exactly as before.
   production never selects it, and its `offline-fixture` version satisfies the gate only
   for a test task with a test-context caller.
 
+### Scoped review context (experimental)
+
+`trusted start --review-context scoped [--review-budget TOKENS]` sends the reviewer a
+deterministic subset of the verified snapshot instead of every file. The default stays
+`full`. A scoped review is labelled as such in its record, the task status, the approval
+and the export, and it is **not a full-repository review**.
+
+* **Always included:** every changed file in full, a deleted file's full base content, the
+  exact patch, the task text and the verification record. These are never truncated.
+* **Selected:** related files in full, ranked by a Python AST graph over both the base and
+  the snapshot tree (direct imports and importers, tests by import or naming, then nearby
+  files), plus a small map of definition names. The method is adapted from the Sprint 06A
+  offline selector, whose design drew on Aider's repo map, Repomix and diffctx; no code
+  from them is included.
+* **Budget:** the whole input, header and task included, is measured in estimated tokens
+  (bytes / 4; default 32,000), within the existing 512 KiB cap. This is a sizing unit,
+  not a tokenizer or a measurement of Claude usage.
+* **Never sent incomplete:** if the mandatory content alone exceeds the budget, or a
+  discovered direct import, importer or direct test would be omitted, Claude is not
+  launched. The attempt is recorded as `unavailable` with the reason; raise the budget
+  or use the full context.
+* **Recorded:** the `review.N` artifact holds the policy version, budget, status,
+  included files, omitted count, critical omissions, the context digest (over the whole
+  input, task text included) and the digest of a local audit file listing every snapshot
+  file with its inclusion reason. The reviewer must echo the context digest. A finding
+  may cite only a supplied file. Approval and export still bind the full snapshot and
+  exact patch.
+* **Limits:** relevance is file-level and approximate. Dynamic imports, fixtures loaded by
+  path, configuration and non-Python consumers are not resolved; an omitted file is not
+  evidence that it is irrelevant or correct.
+* **Offline measurement on tomli (about 1,000 files):** the full input is 437,968 bytes
+  and the scoped input 61,679 bytes (13 files), with every manually chosen target file
+  included. These byte counts say nothing about review quality or actual Claude usage;
+  neither has been measured with a real scoped review yet.
+
 <a id="reviewer-pilot"></a>
 **Reviewer pilot (27 October 2026).** Claude Code 2.1.296, signed in with a Claude Pro
 subscription, ran with `--model claude-sonnet-5-5` and reviewed the first pilot's Codex output.
@@ -568,10 +604,12 @@ These are deliberate disclosures, not fine print. Trusted Local first, then Conf
   shows only that those tests passed.
 * **Trusted Local snapshots** refuse symlinks, submodules, nested `.git`, hardlinks,
   special files, more than 2,000 entries and more than 20 MiB.
-* **The review input is the whole snapshot.** Every included file is sent to Claude Code,
-  capped at 512 KiB. A larger repository cannot be reviewed yet, and a large input uses a
-  correspondingly large share of your Claude quota: the tomli repository, about 1,000
-  files, produces roughly 440 KB of review input.
+* **Full review context sends the whole snapshot.** By default every included file goes to
+  Claude Code, capped at 512 KiB; a larger repository cannot be reviewed in full, and a
+  large input uses a correspondingly large share of your Claude quota (tomli, about 1,000
+  files: roughly 440 KB). The experimental scoped context sends far less, but it is a
+  partial review and its relevance selection is approximate (see
+  [Scoped review context](#scoped-review-context-experimental)).
 * **Live evidence is small.** Real Codex and Claude Code runs have passed only on bundled
   synthetic fixtures. The project demo is synthetic too; no third-party repository has
   been validated end to end yet.

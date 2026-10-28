@@ -61,6 +61,11 @@ def main(argv=None, *, test_context=False):
     start.add_argument("--task", type=Path, required=True)
     start.add_argument("--model", required=True)
     start.add_argument("--review-model", help="require an independent Claude Code review with this model")
+    start.add_argument("--review-context", choices=("full", "scoped"), default="full",
+                       help="full (default): every snapshot file; scoped: changed files plus selected related "
+                            "files, explicitly not a full-repository review")
+    start.add_argument("--review-budget", type=int, metavar="TOKENS",
+                       help="scoped review input limit in estimated tokens (bytes / 4; default 32000)")
     add_verify_options(start)
     check = commands.add_parser("check", help="read-only compatibility check of a repository; no task, "
                                               "agent or model")
@@ -104,7 +109,8 @@ def main(argv=None, *, test_context=False):
             action = args.trusted_command
             if action == "start":
                 result = trusted_engine.start(args.repo, args.base, args.task, args.model,
-                                              review_model=args.review_model, verify=verify_options(args))
+                                              review_model=args.review_model, verify=verify_options(args),
+                                              review_context=args.review_context, review_budget=args.review_budget)
             elif action == "implement":
                 result = trusted_engine.implement(args.task_id, args.codex_bin, args.timeout)
             elif action == "review":

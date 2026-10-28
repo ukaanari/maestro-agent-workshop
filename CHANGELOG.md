@@ -6,6 +6,19 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Experimental scoped review context (`trusted start --review-context scoped`, optional
+  `--review-budget`). It sends the reviewer the changed files in full, the exact patch and
+  related files selected by a deterministic Python import/test graph adapted from the
+  Sprint 06A offline selector (new `context.py`), instead of the whole snapshot.
+  * The input is bounded as a whole and mandatory content is never cut. If it overflows,
+    or a discovered critical file would be omitted, Claude is not launched.
+  * The review uses protocol `maestro-review-v2-scoped` and must echo a context digest
+    that binds the whole input, task text included. A local audit file records every
+    snapshot file and why it was included or omitted.
+  * Scoped reviews are labelled in status, approval and export, never as full-repository
+    reviews. Full context remains the default and is unchanged.
+  * 9 tests; 131 offline tests in total. Offline tomli measurement: 437,968 to 61,679
+    bytes; review quality and real Claude usage are not yet measured.
 * Quickstart: the `M=…; $M doctor` lines failed in zsh, the default macOS shell, because
   zsh does not split a variable into words (found in a fresh-install walkthrough). The
   quickstart now defines a shell function that works in zsh and bash, and a test runs the

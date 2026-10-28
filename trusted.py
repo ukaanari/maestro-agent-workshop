@@ -109,7 +109,7 @@ def verification_dirs(snap, config):
             raise PolicyError("verification directory missing from the snapshot: " + name)
 
 
-def git(cwd, home, *args, index=None, cancelled=lambda: False):
+def git(cwd, home, *args, index=None, cancelled=lambda: False, data=b""):
     # execute builds a private environment; no inherited Git config or credentials.
     env = {"GIT_OPTIONAL_LOCKS": "0", "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
     if index is not None:
@@ -118,7 +118,7 @@ def git(cwd, home, *args, index=None, cancelled=lambda: False):
                     "-c", "core.attributesFile=/dev/null", "-c", "core.autocrlf=false",
                     "-c", "core.filemode=true", "-c", "protocol.allow=never",
                     "-c", "protocol.file.allow=always", "-c", "diff.external=",
-                    "-C", str(cwd), *map(str, args)], str(home), str(home), timeout=60,
+                    "-C", str(cwd), *map(str, args)], str(home), str(home), data=data, timeout=60,
                    max_output=32 * 1024 * 1024, extra_env=env, cancelled=cancelled)
 
 
@@ -306,6 +306,39 @@ def changes(clone, home, snap):
               snap["base"] + "^{tree}", snap["tree"])
     parts = [p.decode("utf-8") for p in raw.split(b"\0") if p]
     return [{"status": s, "path": safe_name(p)} for s, p in zip(parts[0::2], parts[1::2])]
+
+
+def tree_blobs(clone, home, tree):
+    """Every blob of an immutable tree in one batch: path -> {body, mode, oid}, ids rechecked."""
+    entries = {}
+    for row in git(clone, home, "ls-tree", "-r", "-z", tree).split(b"\0"):
+        if not row:
+            continue
+        header, name = row.split(b"\t", 1)
+        mode, kind, oid = header.decode("ascii").split()
+        rel = safe_name(name.decode("utf-8"))
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise PolicyError("unsupported tree entry for review context: " + rel)
+        entries[rel] = (mode, oid)
+    if len(entries) > MAX_ENTRIES:
+        raise PolicyError("tree entry limit exceeded")
+    paths = sorted(entries)
+    raw = git(clone, home, "cat-file", "--batch",
+              data="".join(entries[rel][1] + "\n" for rel in paths).encode("ascii")) if paths else b""
+    files, offset = {}, 0
+    for rel in paths:
+        end = raw.index(b"\n", offset)
+        oid, kind, length = raw[offset:end].decode("ascii").split()
+        body = raw[end + 1:end + 1 + int(length)]
+        algorithm = hashlib.sha1 if len(oid) == 40 else hashlib.sha256
+        if (oid != entries[rel][1] or kind != "blob" or len(body) != int(length) or
+                algorithm(b"blob %d\0" % len(body) + body).hexdigest() != oid):
+            raise PolicyError("unexpected blob for review context: " + rel)
+        files[rel] = {"body": body, "mode": entries[rel][0], "oid": oid}
+        offset = end + 1 + int(length) + 1
+    if offset != len(raw):
+        raise PolicyError("unexpected trailing blob data")
+    return files
 
 
 def materialize(clone, home, snap, copy):
@@ -528,10 +561,17 @@ class TrustedEngine:
             if after != expected:
                 raise IntegrityError("source repository guard changed after " + phase)
 
-    def start(self, repo, base, task_file, model, cancelled=lambda: False, review_model=None, verify=None):
+    def start(self, repo, base, task_file, model, cancelled=lambda: False, review_model=None, verify=None,
+              review_context="full", review_budget=None):
         validate_model(model)
         if review_model is not None:
             validate_model(review_model)
+        if review_context not in ("full", "scoped") or (review_context == "scoped" and review_model is None):
+            raise PolicyError("review context must be 'full' or 'scoped'; scoped needs --review-model")
+        if review_budget is not None and (review_context != "scoped" or type(review_budget) is not int or
+                                          not 1000 <= review_budget <= reviewer.MAX_INPUT // 4):
+            raise PolicyError("--review-budget applies only to a scoped review: 1000 to %d estimated tokens"
+                              % (reviewer.MAX_INPUT // 4))
         command = verification_command(verify)
         if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
             raise PolicyError("trusted-local requires macOS and /usr/bin/python3 (Python 3.9)")
@@ -545,6 +585,8 @@ class TrustedEngine:
         if review_model is not None:
             # Only review-required tasks carry the key, so Codex-only task identities are unchanged.
             spec["review"] = {"provider": reviewer.PROVIDER, "model": review_model}
+            if review_context == "scoped":  # full-context tasks keep their original spec and identity
+                spec["review"].update(context="scoped", budget_estimated_tokens=review_budget or reviewer.DEFAULT_BUDGET)
         if verify is not None:
             spec["verify"] = verify
         task_id = digest(spec)[:16]
@@ -747,10 +789,19 @@ class TrustedEngine:
             raise PolicyError("review provider or model not verified")
         if "offline-fixture" in str(record.get("cli", {}).get("version")) and not (self.test_context and context == "test"):
             raise PolicyError("offline-fixture review requires a test task and explicit test context")
-        review = reviewer.validate_review(record.get("review"), record.get("snapshot_sha256"), record.get("patch_sha256"))
+        scoped = requested.get("context") == "scoped"
+        scope = record.get("context") if scoped else None
+        if scoped and (not isinstance(scope, dict) or scope.get("mode") != "scoped" or
+                       scope.get("policy") != reviewer.SCOPED_POLICY or scope.get("status") != "selected" or
+                       scope.get("budget_estimated_tokens") != requested.get("budget_estimated_tokens")):
+            raise PolicyError("scoped review context evidence mismatch")
+        review = reviewer.validate_review(record.get("review"), record.get("snapshot_sha256"), record.get("patch_sha256"),
+                                          None, scope.get("context_sha256") if scoped else None)
         if record.get("blocking") is not reviewer.blocking(review):
             raise PolicyError("review evidence mismatch")
         gate = {"review_sha256": task["evidence"]["review_sha256"]}
+        if scoped:
+            gate["review_context"] = "scoped"  # recorded in the approval: never a full-repository review
         if record["blocking"]:
             if override is None:
                 raise PolicyError("review reported blocking findings: reject, or approve with an explicit "
@@ -825,6 +876,8 @@ class TrustedEngine:
                           "path": str(home / "export.patch"), "sha256": hashlib.sha256(patch).hexdigest()}
                 if "review_sha256" in gate:
                     record["review_sha256"] = gate["review_sha256"]
+                if "review_context" in gate:
+                    record["review_context"] = gate["review_context"]
                 self.store.artifact(task_id, "export", record)
             except (Exception, KeyboardInterrupt) as exc:
                 self.store.transition(task_id, "invalidated", "Export refused: " + str(exc))
@@ -887,28 +940,52 @@ class TrustedEngine:
             raise PolicyError("review folder already exists; no reuse")
         folder.mkdir(mode=0o700)
         # Disposable read-only input from the snapshot's Git objects, never the live clone.
-        bodies = {rel: git(clone, home, "show", snap["tree"] + ":" + rel)
-                  for rel, entry in snap["manifest"].items() if entry["type"] == "file"}
         patch, files = tree_patch(clone, home, snap), changes(clone, home, snap)
-        data, patch_sha256 = reviewer.build_input(task_id, task["spec"]["prompt"], snap, patch, files, bodies,
-                                                  self.store.artifact(task_id, "verification"))
+        verification = self.store.artifact(task_id, "verification")
+        scoped = task["spec"]["review"].get("context") == "scoped"
+        if scoped:
+            # Presentation policy only: the full snapshot and exact patch stay the bound evidence.
+            data, patch_sha256, scope, audit = reviewer.build_scoped_input(
+                task_id, task["spec"]["prompt"], snap, patch, files, tree_blobs(clone, home, snap["base"] + "^{tree}"),
+                tree_blobs(clone, home, snap["tree"]), verification, task["spec"]["review"]["budget_estimated_tokens"])
+            audit_path = folder / "context-audit.json"
+            atomic_write(audit_path, audit)
+            audit_path.chmod(0o400)
+            record.update(context=dict(scope, audit_path=audit_path.relative_to(home).as_posix()),
+                          classification=reviewer.SCOPED_CLASSIFICATION)
+            allowed = set(scope["included"]) | {f["path"] for f in files}
+        else:
+            bodies = {rel: git(clone, home, "show", snap["tree"] + ":" + rel)
+                      for rel, entry in snap["manifest"].items() if entry["type"] == "file"}
+            data, patch_sha256 = reviewer.build_input(task_id, task["spec"]["prompt"], snap, patch, files, bodies,
+                                                      verification)
+            allowed = set(bodies) | {f["path"] for f in files}
         staged = folder / "input.txt"
         atomic_write(staged, data)
         staged.chmod(0o400)
         record.update(snapshot_sha256=snap["sha256"], tree=snap["tree"], patch_sha256=patch_sha256,
                       input={"path": staged.relative_to(home).as_posix(), "bytes": len(data),
                              "sha256": hashlib.sha256(data).hexdigest()})
+        if scoped and scope["status"] != "selected":
+            # Never send an incomplete context: no launch, a precise reason, the prompt kept as evidence.
+            record["outcome"] = "unavailable"
+            reason = ("mandatory changed content alone exceeds the budget (%d > %d bytes)"
+                      % (scope["mandatory_bytes"], min(scope["budget_estimated_tokens"] * 4, reviewer.MAX_INPUT))
+                      if scope["status"] == "budget-exceeded" else
+                      "critical related files would be omitted: " + ", ".join(scope["critical_omitted"][:5]))
+            raise PolicyError("scoped review not launched (%s): %s; raise --review-budget or use the full context"
+                              % (scope["status"], reason))
         try:
             info = reviewer.claude_info(claude_bin)
         except (PolicyError, OSError, subprocess.SubprocessError) as exc:
             record["outcome"] = "unavailable"
             raise PolicyError("reviewer unavailable: " + str(exc)) from exc
         model = task["spec"]["review"]["model"]
-        record.update(cli=info, environment=reviewer.environment_record(), argv=reviewer.argv(info["path"], model))
+        record.update(cli=info, environment=reviewer.environment_record(), argv=reviewer.argv(info["path"], model, scoped))
         workdir = folder / "cwd"
         workdir.mkdir(mode=0o700)
         code = reviewer.run(info["path"], model, workdir, staged, folder, timeout,
-                            lambda: self.store.cancelled(task_id), record)
+                            lambda: self.store.cancelled(task_id), record, scoped)
         if read_regular(staged, reviewer.MAX_INPUT)[0] != data:
             raise PolicyError("staged review input changed")
         text = reviewer.parse_output(read_regular(folder / "stdout.json", reviewer.MAX_LOG)[0], record)
@@ -918,7 +995,8 @@ class TrustedEngine:
         if not record["model_verified"]:
             raise PolicyError("review model not verified: requested %s, CLI reported %s"
                               % (model, record["models_reported"]))
-        review = reviewer.parse_review(text, snap["sha256"], patch_sha256, set(bodies) | {f["path"] for f in files})
+        review = reviewer.parse_review(text, snap["sha256"], patch_sha256, allowed,
+                                       scope["context_sha256"] if scoped else None)
         return {"review": review, "blocking": reviewer.blocking(review)}
 
     def annotate(self, task_id, evidence, message):
@@ -935,7 +1013,7 @@ class TrustedEngine:
     def review_summary(self, task):
         attempts = task["evidence"].get("review_attempts", 0)
         summary = {"required": True, "model": task["spec"]["review"]["model"], "attempts": attempts,
-                   "attempts_allowed": reviewer.ATTEMPTS}
+                   "attempts_allowed": reviewer.ATTEMPTS, "context_mode": task["spec"]["review"].get("context", "full")}
         if attempts:
             record = self.store.artifact(task["id"], "review.%d" % attempts)
             summary.update({key: record[key] for key in (
@@ -944,6 +1022,14 @@ class TrustedEngine:
             summary["cli_version"] = record.get("cli", {}).get("version")
             if record.get("review"):
                 summary.update({key: record["review"][key] for key in ("verdict", "summary", "findings")})
+            scope = record.get("context")
+            if scope:
+                summary["context"] = {key: scope[key] for key in (
+                    "status", "included", "included_count", "omitted_count", "snapshot_file_count", "critical_omitted",
+                    "context_sha256", "audit_sha256", "payload_bytes", "estimated_tokens", "limitations") if key in scope}
+                summary["scope_notice"] = ("scoped review: %d files supplied in full, from a %d-file snapshot; "
+                                           "not a full-repository review" % (scope["included_count"],
+                                                                             scope["snapshot_file_count"]))
         return summary
 
     def next_steps(self, task):

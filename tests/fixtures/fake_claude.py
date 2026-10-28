@@ -50,6 +50,11 @@ elif scenario == "extra-field":
     review["approved"] = True
 elif scenario == "unknown-file":
     review["findings"][0]["file"] = "not-in-input.py"
+if "context_sha256" in payload:  # a scoped envelope: echo the exact context seen
+    review["context_sha256"] = "f" * 64 if scenario == "wrong-context" else payload["context_sha256"]
+    supplied = {f["path"] for f in payload["files"]}
+    if scenario == "omitted-file":  # cite a real snapshot file that was not supplied
+        review["findings"][0]["file"] = next(r["path"] for r in payload["repository_map"] if r["path"] not in supplied)
 text = json.dumps(review)
 if scenario == "malformed":
     text = "Looks good to me. Approved!"
