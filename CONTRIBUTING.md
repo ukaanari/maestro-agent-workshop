@@ -69,7 +69,9 @@ blocks three kinds of content:
 
 It scans what Git records (staged blobs, the commits being pushed, tracked files), never
 the working copy, and it never prints a matched value. Test canaries and placeholder
-samples (`example`, `sentinel`, `canary`, localhost URLs) are accepted.
+samples (`example`, `sentinel`, `canary`, `changeme`) are accepted. A real-looking password
+in a URL is flagged even for localhost, and an `.env.example` inside a forbidden directory
+is still blocked.
 
 Install the local hooks once per clone:
 
@@ -92,8 +94,9 @@ Limits:
   reaches GitHub, revoke and rotate it first; deleting the commit does not make it safe.
 * Detection is pattern-based. Unknown token formats, values split across lines or encoded
   are missed, and binary files are checked by path only.
-* `privacy-scan: allow` on a line skips the content rules for that line. Use it only for
-  deliberate public examples; reviewers should treat it like any other change.
+* `privacy-scan: allow` on a line skips the secret and identifier rules for that line, but
+  never your private terms. Use it only for deliberate public examples; reviewers should
+  treat it like any other change.
 
 GitHub secret scanning and push protection add a server-side layer for supported token
 formats, even when the local hooks are bypassed. Both were enabled for this repository

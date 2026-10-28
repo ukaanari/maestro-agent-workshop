@@ -70,9 +70,9 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 141 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 144 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 9 Claude reviewer tests, 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), 9 scoped-review tests and 10 privacy-guard
+`trusted check`, next steps, the project demo), 9 scoped-review tests and 13 privacy-guard
 tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:

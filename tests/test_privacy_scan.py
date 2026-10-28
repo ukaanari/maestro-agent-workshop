@@ -103,8 +103,8 @@ class PrivacyScanTests(unittest.TestCase):
             'paths = ["/Users/runner/work", "/absolute/path/to/repo", "~/.local/bin/claude"]',
             'url = "https://github.com/ukaanari/maestro-agent-workshop"; password = input()',
             'token_budget = 32000  # sk-short is not a key',
-            # Local services: exempt by host alone, even with a non-placeholder password.
-            'db = "postgres://app:' + 'Zq8rT4mW9xL2' + '@127.0.0.1:5432/dev"; cache = "redis://u:' + 'Kp3v' + '@localhost:6379"',
+            # Local services with placeholder passwords stay usable.
+            'db = "postgres://app:example-password@127.0.0.1:5432/dev"; cache = "redis://u:changeme@localhost:6379"',
             '']))
         self.write("README.md", "Use `maestro.py trusted check` before a task.\n")
         self.assertEqual(self.scan("staged"), (0, "privacy-scan: clean\n"))
@@ -168,6 +168,64 @@ class PrivacyScanTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("private-term-1", output)
         self.assertNotIn("luebird", output)
+
+    def test_env_samples_do_not_bypass_forbidden_directories(self):
+        blocked = {"pilot-evidence/.env.example": "maestro-state", ".maestro/.env.example": "maestro-state",
+                   ".claude/.env.sample": "agent-transcript", ".scoped-tests-x1/.env.template": "test-temp",
+                   ".maestro/tasks/0123456789abcdef/clone/.env.dist": "maestro-state"}
+        for path in blocked:
+            self.write(path, "API_KEY=your-api-key-here\n")
+        self.write(".env.example", "API_KEY=your-api-key-here\n")
+        self.write("config/.env.sample", "API_KEY=your-api-key-here\n")
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for path, rule in blocked.items():
+            with self.subTest(path=path):
+                self.assertIn("%s %s  (" % (rule.ljust(24), path), output)
+        self.assertEqual(output.count("BLOCKED, %d finding" % len(blocked)), 1, output)  # the samples are not
+        self.assertNotIn(" .env.example  (", output)
+        self.assertNotIn("config/.env.sample", output)
+
+    def test_localhost_credentials_are_detected_unless_placeholders(self):
+        real = {"postgres://app:" + "Zq8rT4mW9xL2" + "@127.0.0.1:5432/dev": "Zq8rT4mW9xL2",
+                "redis://u:" + "Kp3vN7" + "@localhost:6379": "Kp3vN7",
+                "mysql://root:" + "hunter2xyz" + "@[::1]:3306/db": "hunter2xyz"}
+        for index, url in enumerate(real):
+            self.write("conf/local_%d.py" % index, "url = %r\n" % url)
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for index, secret in enumerate(real.values()):
+            with self.subTest(index=index):
+                self.assertIn("url-credentials          conf/local_%d.py:1" % index, output)
+                self.assertNotIn(secret, output)
+        clean = self.repo / "placeholders"
+        self.repo = clean
+        clean.mkdir()
+        self.git("init", "-q")
+        self.write("conf/local.py", "\n".join([
+            'proxy = "http://user:test-only-sentinel@127.0.0.1:9"',
+            'db = "postgres://app:example-password@localhost:5432/dev"',
+            'cache = "redis://u:changeme@127.0.0.1:6379"', '']))
+        self.assertEqual(self.scan("staged"), (0, "privacy-scan: clean\n"))
+
+    def test_allow_marker_cannot_suppress_private_terms(self):
+        info = Path(self.git("rev-parse", "--git-path", "info").strip())
+        if not info.is_absolute():
+            info = self.repo / info
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "privacy-denylist").write_text("project bluebird\n")
+        self.write("notes.md", "Roadmap for Project Bluebird  <!-- privacy-scan: allow -->\n"
+                               "Example key: %s  <!-- privacy-scan: allow -->\n" % SECRETS["aws-access-key"])
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        self.assertIn("private-term-1           notes.md:1", output)
+        self.assertNotIn("luebird", output)
+        self.assertNotIn("aws-access-key", output)  # the marker still covers a deliberate example
+        self.git("commit", "-q", "--no-verify", "-m", "Mention project bluebird  privacy-scan: allow")
+        head = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (head, "0" * 40))
+        self.assertEqual(code, 1)
+        self.assertIn("message:1", output)  # commit messages cannot suppress private terms either
 
     def test_allow_marker_skips_a_reviewed_public_example(self):
         self.write("docs/example.md", "Example key: %s  <!-- privacy-scan: allow -->\n" % SECRETS["aws-access-key"])

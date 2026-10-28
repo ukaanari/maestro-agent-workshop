@@ -15,7 +15,8 @@ in .git/info (which Git never commits).
   privacy_scan.py install [--force]  install the pre-commit and pre-push hooks
 
 Exit status: 0 clean, 1 findings, 2 error. A line containing `privacy-scan: allow`
-is not checked by the content rules; such lines are reviewed like any change.
+is not checked by the secret and identifier rules; such lines are reviewed like any
+change. Private terms are checked on every line: the marker cannot suppress them.
 Hooks are bypassed by `git commit --no-verify` and `git push --no-verify`, and CI
 runs only after a push: it cannot un-publish a secret. See CONTRIBUTING.md.
 """
@@ -52,7 +53,6 @@ EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
 EMAIL_DOMAINS = re.compile(r"(?i)(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost|"
                            r"users\.noreply\.github\.com|noreply\.github\.com)$")
 EMAIL_ADDRESSES = {"noreply@anthropic.com", "git@github.com", "git@gitlab.com", "git@bitbucket.org"}
-LOCAL_HOSTS = re.compile(r"(?i)^(?:localhost|127\.\d+\.\d+\.\d+|\[?::1\]?|(?:.+\.)?(?:example\.(?:com|org|net)|invalid|test|example))$")
 
 # Paths that should never be tracked here, whatever they contain.
 FORBIDDEN = [
@@ -131,12 +131,18 @@ def scan_text(text, terms):
     """(rule, line, length) for each finding. Values are measured, never returned."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
+        # Private terms come first and are never suppressible: the allow marker exists for
+        # deliberate public examples, and a private term is never one.
+        for index, term in enumerate(terms, 1):
+            if term.search(line):
+                found.append(("private-term-%d" % index, number, 0))
         if ALLOW_MARKER in line:
             continue
         for rule, pattern in SECRETS:
             found += [(rule, number, len(m.group(0))) for m in pattern.finditer(line)]
         for m in URL_CREDENTIALS.finditer(line):
-            if not LOCAL_HOSTS.match(m.group(2)) and not PLACEHOLDER.search(m.group(1)):
+            # No host is exempt: a real password for a local database is still a credential.
+            if not PLACEHOLDER.search(m.group(1)):
                 found.append(("url-credentials", number, len(m.group(1))))
         for m in ASSIGNMENT.finditer(line):
             value = m.group(1)
@@ -149,16 +155,13 @@ def scan_text(text, terms):
         for m in EMAIL.finditer(line):
             if not email_allowed(m.group(0), m.group(1)):
                 found.append(("personal-email", number, len(m.group(0))))
-        for index, term in enumerate(terms, 1):
-            if term.search(line):
-                found.append(("private-term-%d" % index, number, 0))
     return found
 
 
 def forbidden(path):
-    if ENV_SAMPLE.search(path):
-        return None
     for rule, pattern, why in FORBIDDEN:
+        if rule == "env-file" and ENV_SAMPLE.search(path):
+            continue  # a sample is fine, but never inside a forbidden directory
         if pattern.search(path):
             return rule, why
     return None

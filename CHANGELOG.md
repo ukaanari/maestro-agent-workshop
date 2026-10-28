@@ -15,7 +15,7 @@ describes work after the latest tag.
 
   It blocks high-confidence secrets, personal identifiers and forbidden paths in staged
   blobs, pushed commits (content, messages and identities) and tracked files, and never
-  prints a matched value. 10 tests; an audit of the published history found nothing.
+  prints a matched value. 13 tests; an audit of the published history found nothing.
 * Experimental scoped review context (`trusted start --review-context scoped`, optional
   `--review-budget`). It sends the reviewer the changed files in full, the exact patch and
   related files selected by a deterministic Python import/test graph adapted from the
