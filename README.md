@@ -70,8 +70,8 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 121 offline tests: the original 80 listed below, plus 19 Trusted Local
-acceptance tests, 9 Claude reviewer tests and 13 usability tests (verification layouts,
+The suite has 122 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests, 9 Claude reviewer tests and 14 usability tests (verification layouts,
 `trusted check`, next steps, the project demo), many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
@@ -120,18 +120,18 @@ Then on your repository (commit your work first, and leave the repository untouc
 a task is open):
 
 ```sh
-M="/usr/bin/python3 -B $PWD/maestro.py"
-$M doctor                                                # 1-2. prerequisites; changes nothing
+MAESTRO=$PWD; m() { /usr/bin/python3 -B "$MAESTRO/maestro.py" "$@"; }             # works in zsh and bash
+m doctor                                                                          # 1-2. prerequisites; changes nothing
 REPO=/absolute/path/to/repo; BASE=$(git -C "$REPO" rev-parse HEAD)
-$M trusted check --repo "$REPO" --base "$BASE" --pythonpath src --top-level-dir .   # 3. compatibility
-$M trusted start --repo "$REPO" --base "$BASE" --task /absolute/path/TASK.md \
-   --model MODEL --pythonpath src --top-level-dir . --review-model REVIEW_MODEL     # 4. one task
-$M trusted implement TASK_ID                             # 4. one Codex run
-$M trusted verify TASK_ID                                # 5. your tests, in Seatbelt
-$M trusted review TASK_ID                                # 5. optional fresh Claude Code review
-$M trusted diff TASK_ID; $M trusted status TASK_ID       # 6. exact patch, findings, next steps
-$M trusted approve TASK_ID --snapshot SNAPSHOT_SHA256 --founder 'Your Name'   # 7. or: trusted reject
-$M trusted export TASK_ID                                # 8. patch file; you apply it yourself
+m trusted check --repo "$REPO" --base "$BASE" --pythonpath src --top-level-dir .  # 3. compatibility
+m trusted start --repo "$REPO" --base "$BASE" --task /absolute/path/TASK.md \
+   --model MODEL --pythonpath src --top-level-dir . --review-model REVIEW_MODEL   # 4. one task
+m trusted implement TASK_ID                                                       # 4. one Codex run
+m trusted verify TASK_ID                                                          # 5. your tests, in Seatbelt
+m trusted review TASK_ID                                                          # 5. optional fresh Claude Code review
+m trusted diff TASK_ID; m trusted status TASK_ID                                  # 6. exact patch, findings, next steps
+m trusted approve TASK_ID --snapshot SNAPSHOT_SHA256 --founder 'Your Name'        # 7. or: trusted reject
+m trusted export TASK_ID                                                          # 8. patch file; you apply it yourself
 ```
 
 * Use the layout options that match your project, or none for the original
@@ -148,7 +148,8 @@ $M trusted export TASK_ID                                # 8. patch file; you ap
 * `trusted check` creates no task and calls no agent: it clones the base into a temporary
   directory and runs your tests there in Seatbelt. A failing baseline is normal before
   the change; an error means the setup cannot work. Fix the layout before spending a
-  Codex run.
+  Codex run. For a failing run it shows only the first 1,000 bytes of test output, without
+  counts, so run the suite yourself if you need every failure.
 * Every command prints JSON, including `next`, the suggested commands for the current
   state. Drop `--review-model` and `trusted review` for a Codex-only task. `MODEL` is a
   model your Codex CLI lists (`codex debug models`); `REVIEW_MODEL` is a full Claude model
@@ -567,6 +568,10 @@ These are deliberate disclosures, not fine print. Trusted Local first, then Conf
   shows only that those tests passed.
 * **Trusted Local snapshots** refuse symlinks, submodules, nested `.git`, hardlinks,
   special files, more than 2,000 entries and more than 20 MiB.
+* **The review input is the whole snapshot.** Every included file is sent to Claude Code,
+  capped at 512 KiB. A larger repository cannot be reviewed yet, and a large input uses a
+  correspondingly large share of your Claude quota: the tomli repository, about 1,000
+  files, produces roughly 440 KB of review input.
 * **Live evidence is small.** Real Codex and Claude Code runs have passed only on bundled
   synthetic fixtures. The project demo is synthetic too; no third-party repository has
   been validated end to end yet.

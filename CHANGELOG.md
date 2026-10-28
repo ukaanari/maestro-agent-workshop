@@ -1,9 +1,20 @@
 # Changelog
 
-Tagged pre-releases: `v0.1.0-alpha` (synthetic-only), `v0.2.0-alpha` (Trusted Local MVP)
-and `v0.3.0-alpha` (Claude Code reviewer). A section marked "unreleased" is not tagged yet.
+Tagged pre-releases: `v0.1.0-alpha` (synthetic-only), `v0.2.0-alpha` (Trusted Local MVP),
+`v0.3.0-alpha` (Claude Code reviewer) and `v0.4.0-alpha` (Usability MVP). "Unreleased"
+describes work after the latest tag.
 
-## v0.4.0-alpha (unreleased) — Usability MVP
+## Unreleased
+
+* Quickstart: the `M=…; $M doctor` lines failed in zsh, the default macOS shell, because
+  zsh does not split a variable into words (found in a fresh-install walkthrough). The
+  quickstart now defines a shell function that works in zsh and bash, and a test runs the
+  README's own line under `zsh -f`.
+* README limitations now state that the reviewer receives the whole snapshot (capped at
+  512 KiB) and that a failing `trusted check` shows only the first 1,000 bytes of output.
+* This changelog no longer labels the tagged `v0.4.0-alpha` section "unreleased".
+
+## v0.4.0-alpha — Usability MVP
 
 * `maestro.py --version` reports the release (it said `0.1.0-alpha` through `v0.3.0-alpha`).
   A test now ties it to the newest heading in this file.

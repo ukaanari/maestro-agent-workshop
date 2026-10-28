@@ -70,6 +70,18 @@ class VerificationConfigTests(unittest.TestCase):
             with self.subTest(tampered=tampered), self.assertRaises(PolicyError):
                 trusted.verification_command(tampered)
 
+    @unittest.skipUnless(os.path.exists("/bin/zsh"), "zsh is the default macOS shell")
+    def test_readme_quickstart_runs_in_zsh(self):
+        # A fresh-install walkthrough found `M="…"; $M doctor` failing in zsh (no word splitting).
+        readme = (ROOT / "README.md").read_text()
+        quickstart = readme[readme.index("## Quickstart"):readme.index("## Trusted Local Mode")]
+        self.assertIsNone(re.search(r"^\$M ", quickstart, re.M))
+        line = next(l for l in quickstart.splitlines() if l.startswith("MAESTRO=$PWD; m() {")).split("  #")[0]
+        result = subprocess.run(["/bin/zsh", "-f", "-c", line + "\nm --version"], cwd=str(ROOT),
+                                capture_output=True, text=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split()[-1], maestro.__version__)
+
     def test_cli_version_matches_the_latest_changelog_release(self):
         heading = re.search(r"^## v?(\d+\.\d+\.\d+-\w+)", (ROOT / "CHANGELOG.md").read_text(), re.M)
         self.assertEqual(maestro.__version__, heading.group(1))
