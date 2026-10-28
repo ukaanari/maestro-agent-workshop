@@ -370,10 +370,24 @@ and the export, and it is **not a full-repository review**.
 * **Limits:** relevance is file-level and approximate. Dynamic imports, fixtures loaded by
   path, configuration and non-Python consumers are not resolved; an omitted file is not
   evidence that it is irrelevant or correct.
+* **Known gap: indirect tests.** A test counts as must-include only if it imports a changed
+  module directly or is named after it. A test that reaches the changed code through its
+  package (tomli's tests use `from . import tomllib`) is included only if the budget
+  allows. Under a tight budget it can be dropped while the status still says `selected`:
+  on tomli, a 12,000-token budget omits 3 of the 4 relevant test files without a
+  warning. At 16,000 and at the default 32,000 nothing relevant is dropped. The audit
+  file always records the omission.
 * **Offline measurement on tomli (about 1,000 files):** the full input is 437,968 bytes
   and the scoped input 61,679 bytes (13 files), with every manually chosen target file
-  included. These byte counts say nothing about review quality or actual Claude usage;
-  neither has been measured with a real scoped review yet.
+  included.
+* **One live comparison (tomli #312, `claude-sonnet-5-5`):** on the same frozen snapshot
+  and patch, the earlier full review used 230,538 Claude input tokens and one scoped
+  review used 31,324, as reported by the CLI. Both returned `no_blocking_findings`.
+  * This is a single sample of each, run about six hours apart, with different envelopes
+    and contracts, on a patch already known to be correct.
+  * It shows the scoped review neither invented problems nor contradicted the full one
+    here. It does not show that scoped reviews catch defects as well as full reviews;
+    that is not yet measured.
 
 <a id="reviewer-pilot"></a>
 **Reviewer pilot (27 October 2026).** Claude Code 2.1.296, signed in with a Claude Pro

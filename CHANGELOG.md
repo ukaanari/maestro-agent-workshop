@@ -18,7 +18,14 @@ describes work after the latest tag.
   * Scoped reviews are labelled in status, approval and export, never as full-repository
     reviews. Full context remains the default and is unchanged.
   * 9 tests; 131 offline tests in total. Offline tomli measurement: 437,968 to 61,679
-    bytes; review quality and real Claude usage are not yet measured.
+    bytes.
+  * One live comparison on the frozen tomli #312 snapshot: 230,538 Claude input tokens
+    for the earlier full review and 31,324 for one scoped review, both
+    `no_blocking_findings`. This is a single sample on a correct patch; defect-detection
+    quality is not yet measured.
+  * Known gap: tests that reach changed code only through its package are not treated as
+    must-include. Under a tight budget they can be dropped while the status says
+    `selected` (tomli: at 12,000 tokens; not at the 32,000 default).
 * Quickstart: the `M=…; $M doctor` lines failed in zsh, the default macOS shell, because
   zsh does not split a variable into words (found in a fresh-install walkthrough). The
   quickstart now defines a shell function that works in zsh and bash, and a test runs the
