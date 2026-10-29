@@ -6,6 +6,12 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Scoped-context policy v2: tests that reach a changed module within three explicit import
+  hops (for example through package initializers) are must-include. If one is omitted, the
+  status is `incomplete-critical-context` and Claude is not launched. Implicit parent-package
+  imports are not followed, so sibling-submodule tests are not made critical. On tomli the
+  12,000-token case is now reported as incomplete, and the 32,000 selection is unchanged.
+  Two tests.
 * Privacy guard for the public repository:
   * new `.github/scripts/privacy_scan.py`, standard library and offline;
   * local pre-commit and pre-push hooks (`privacy_scan.py install`);
@@ -33,9 +39,8 @@ describes work after the latest tag.
     for the earlier full review and 31,324 for one scoped review, both
     `no_blocking_findings`. This is a single sample on a correct patch; defect-detection
     quality is not yet measured.
-  * Known gap: tests that reach changed code only through its package are not treated as
-    must-include. Under a tight budget they can be dropped while the status says
-    `selected` (tomli: at 12,000 tokens; not at the 32,000 default).
+  * Known gap, closed by scoped-context policy v2 (below): tests that reached changed code
+    only through its package were not treated as must-include.
 * Quickstart: the `M=…; $M doctor` lines failed in zsh, the default macOS shell, because
   zsh does not split a variable into words (found in a fresh-install walkthrough). The
   quickstart now defines a shell function that works in zsh and bash, and a test runs the

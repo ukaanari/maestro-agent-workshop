@@ -107,6 +107,45 @@ class ScopedSelectorTests(unittest.TestCase):
         self.assertEqual(document["files"]["shop/legacy.py"], "def old():\n    return 1\n")  # deleted: base body
         self.assertEqual(document["map"], [])  # the optional map shrank first
 
+    @staticmethod
+    def package_files(api_padding=0):
+        return {
+            "pkg/__init__.py": "from pkg.core import parse\n",
+            "pkg/core.py": "def parse(text):\n    return text\n",
+            "pkg/extra.py": "def other():\n    return 1\n",
+            "deep/a.py": "import deep.b\n", "deep/b.py": "import deep.c\n", "deep/c.py": "import pkg.core\n",
+            "tests/__init__.py": "import pkg as lib\n",
+            # Reaches pkg/core.py only through two package initializers (the tomli shape).
+            "tests/test_api.py": "import unittest\n\nfrom . import lib\n" + "# padding\n" * api_padding +
+                                 "\n\nclass ApiTests(unittest.TestCase):\n    def test_parse(self):\n"
+                                 "        self.assertEqual(lib.parse('a'), 'a')\n",
+            # Imports a sibling submodule: its parent package is implicit and not followed.
+            "tests/test_extra.py": "import unittest\n\nfrom pkg.extra import other\n",
+            # Four explicit hops to pkg/core.py: beyond the bound, deliberately.
+            "tests/test_deep.py": "import unittest\n\nimport deep.a\n",
+        }
+
+    def test_tests_reaching_a_change_through_packages_are_critical_within_a_bound(self):
+        before = blobs(self.package_files())
+        after = blobs(dict(self.package_files(), **{"pkg/core.py": "def parse(text):\n    return text.strip()\n"}))
+        _, _, selection = context.select(before, after, render_bodies(after, before), 400000)
+        self.assertEqual(selection["status"], "selected")
+        self.assertEqual(selection["direct_tests"], [])  # no test imports pkg/core.py or is named after it
+        self.assertIn("tests/test_api.py", selection["indirect_tests"])
+        self.assertIn("tests/test_api.py", selection["critical"])
+        for path in ("tests/test_extra.py", "tests/test_deep.py"):
+            self.assertNotIn(path, selection["indirect_tests"])
+            self.assertNotIn(path, selection["critical"])
+        self.assertEqual(context.TEST_HOPS, 3)
+
+    def test_an_omitted_package_reached_test_makes_the_context_incomplete(self):
+        before = blobs(self.package_files(api_padding=2000))
+        after = blobs(dict(self.package_files(api_padding=2000), **{"pkg/core.py": "def parse(text):\n    return text.strip()\n"}))
+        _, _, selection = context.select(before, after, render_bodies(after, before), 9000)
+        self.assertNotIn("tests/test_api.py", selection["selected"])
+        self.assertEqual(selection["status"], "incomplete-critical-context")  # never a silent "selected"
+        self.assertIn("tests/test_api.py", selection["critical_omitted"])
+
     def test_selection_is_identical_across_hash_seeds(self):
         program = ("import hashlib, sys; sys.path.insert(0, %r); sys.path.insert(0, %r)\n"
                    "import test_scoped_review as t, context\n"
