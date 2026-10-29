@@ -70,9 +70,9 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 144 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 146 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 9 Claude reviewer tests, 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), 9 scoped-review tests and 13 privacy-guard
+`trusted check`, next steps, the project demo), 11 scoped-review tests and 13 privacy-guard
 tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
@@ -370,13 +370,14 @@ and the export, and it is **not a full-repository review**.
 * **Limits:** relevance is file-level and approximate. Dynamic imports, fixtures loaded by
   path, configuration and non-Python consumers are not resolved; an omitted file is not
   evidence that it is irrelevant or correct.
-* **Known gap: indirect tests.** A test counts as must-include only if it imports a changed
-  module directly or is named after it. A test that reaches the changed code through its
-  package (tomli's tests use `from . import tomllib`) is included only if the budget
-  allows. Under a tight budget it can be dropped while the status still says `selected`:
-  on tomli, a 12,000-token budget omits 3 of the 4 relevant test files without a
-  warning. At 16,000 and at the default 32,000 nothing relevant is dropped. The audit
-  file always records the omission.
+* **Tests reached through packages (policy v2).** A test is must-include when it imports a
+  changed module directly, is named after it, or reaches it within three explicit import
+  hops (tomli's tests use `from . import tomllib`, which reaches the parser through two
+  package initializers). Implicit parent-package imports are not followed, so a test that
+  imports a sibling submodule is not made critical. On tomli, a 12,000-token budget now
+  reports `incomplete-critical-context` instead of `selected`, and the default 32,000
+  selection is unchanged. Longer import chains and tests that load code dynamically are
+  not detected.
 * **Offline measurement on tomli (about 1,000 files):** the full input is 437,968 bytes
   and the scoped input 61,679 bytes (13 files), with every manually chosen target file
   included.

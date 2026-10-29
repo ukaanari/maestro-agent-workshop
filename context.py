@@ -20,7 +20,8 @@ import json
 from pathlib import PurePosixPath
 import re
 
-POLICY = "maestro-scoped-context-v1"
+POLICY = "maestro-scoped-context-v2"   # v2: tests reaching a changed module through packages are critical
+TEST_HOPS = 3                          # test -> package __init__ -> package __init__ -> module
 MAP_BYTES, MAP_SYMBOLS = 2048, 12
 LIMITATIONS = (
     "Scoped review: only the listed files were supplied in full; this is not a full-repository review.",
@@ -85,7 +86,7 @@ def graph_for(files):
             modules[module_name(p)].add(p)
         for name in info["definitions"]:
             definitions[name].add(p)
-    edges, imports = defaultdict(dict), defaultdict(set)
+    edges, imports, explicit = defaultdict(dict), defaultdict(set), defaultdict(set)
 
     def link(a, b, weight):
         if a != b:
@@ -102,6 +103,7 @@ def graph_for(files):
             targets = set(modules.get(name, ()))
             for child in names:
                 targets.update(modules.get(name + "." + child, ()))
+            explicit[path].update(targets)  # what the statement names, not its parent packages
             # Package initializers for dotted imports and re-export chains.
             for count in range(1, len(name.split("."))):
                 targets.update(p for p in modules.get(".".join(name.split(".")[:count]), ())
@@ -116,22 +118,39 @@ def graph_for(files):
                 for target in targets:
                     link(path, target, 2)
                     link(target, path, 1)
-    return parsed, edges, imports
+    return parsed, edges, imports, explicit
+
+
+def reaches(start, targets, explicit, hops=TEST_HOPS):
+    """True when `start` reaches a target within `hops` explicit import edges.
+
+    Implicit parent-package edges are not followed, so a test that imports one
+    submodule does not inherit everything its package initializer re-exports.
+    """
+    seen, frontier = {start}, {start}
+    for _ in range(hops):
+        frontier = {b for a in frontier for b in explicit.get(a, ()) if b not in seen}
+        if frontier & targets:
+            return True
+        seen |= frontier
+    return False
 
 
 def rank(before, after):
-    """Changed paths, parse info, ranked candidates, reasons, direct tests, critical set, scores."""
+    """Changed paths, parse info, ranked candidates, reasons, direct and indirect tests, critical set, scores."""
     changed = {p for p in set(before) | set(after)
                if (before.get(p, {}).get("oid"), before.get(p, {}).get("mode")) !=
                   (after.get(p, {}).get("oid"), after.get(p, {}).get("mode"))}
-    _, old_edges, old_imports = graph_for(before)
-    info, edges, imports = graph_for(after)
+    _, old_edges, old_imports, old_explicit = graph_for(before)
+    info, edges, imports, explicit = graph_for(after)
     # Union both trees: a removed import or deleted helper still seeds context.
     for a, neighbors in old_edges.items():
         for b, weight in neighbors.items():
             edges[a][b] = max(edges[a].get(b, 0), weight)
     for a, neighbors in old_imports.items():
         imports[a].update(neighbors)
+    for a, neighbors in old_explicit.items():
+        explicit[a].update(neighbors)
     reasons, direct_tests = defaultdict(set), set()
     for p in after:
         if is_test(p):
@@ -140,6 +159,10 @@ def rank(before, after):
             if imports[p] & changed or any(PurePosixPath(c).stem == stem for c in changed):
                 direct_tests.add(p)
                 reasons[p].add("direct-test")
+    # Tests that exercise a changed module through its package (tomli: `from . import tomllib`).
+    indirect_tests = {p for p in after if is_test(p) and p not in direct_tests and reaches(p, changed, explicit)}
+    for p in indirect_tests:
+        reasons[p].add("indirect-test")
     seeds = {p: 1000000 for p in changed}
     # Added AND removed lines supply identifier hints.
     identifiers = set()
@@ -187,11 +210,11 @@ def rank(before, after):
             reasons[p].add("graph-reachable")
     for p in changed:
         reasons[p].add("changed-full")
-    priority = lambda p: (0 if p in dependencies | callers else 1 if p in direct_tests else
+    priority = lambda p: (0 if p in dependencies | callers else 1 if p in direct_tests | indirect_tests else
                           2 if distance.get(p, 99) <= 2 else 3, -scores.get(p, 0), p)
     candidates = sorted((p for p in after if p not in changed and scores.get(p, 0)), key=priority)
-    critical = (dependencies | callers | direct_tests) & set(after)
-    return changed, info, candidates, reasons, direct_tests, critical, scores
+    critical = (dependencies | callers | direct_tests | indirect_tests) & set(after)
+    return changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores
 
 
 def select(before, after, render, budget_bytes):
@@ -202,7 +225,7 @@ def select(before, after, render, budget_bytes):
     patch and binding metadata are mandatory and never cut; the map shrinks first.
     Returns (payload, canonical audit bytes, selection summary).
     """
-    changed, info, candidates, reasons, direct_tests, critical, scores = rank(before, after)
+    changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores = rank(before, after)
     universe = sorted(set(before) | set(after))
     selected = set(changed)
     outline, size = [], 0
@@ -258,7 +281,8 @@ def select(before, after, render, budget_bytes):
     status = ("budget-exceeded" if len(payload) > budget_bytes else
               "incomplete-critical-context" if final["critical_omitted"] else "selected")
     return payload, audit, dict(final, status=status, mandatory_bytes=mandatory,
-                                direct_tests=sorted(direct_tests), critical=sorted(critical),
+                                direct_tests=sorted(direct_tests), indirect_tests=sorted(indirect_tests),
+                                critical=sorted(critical),
                                 parse_failures=sorted(p for p in info if info[p]["status"] == "parse-failed"))
 
 

@@ -197,6 +197,7 @@ def build_scoped_input(task_id, task, snap, patch, changes, before, after, verif
               "snapshot_file_count": len(files), "included": selection["selected"],
               "included_count": len(selection["selected"]), "omitted_count": selection["omitted_count"],
               "critical_omitted": selection["critical_omitted"], "direct_tests": selection["direct_tests"],
+              "indirect_tests": selection["indirect_tests"],
               "parse_failures": selection["parse_failures"], "mandatory_bytes": selection["mandatory_bytes"],
               "payload_bytes": len(data), "estimated_tokens": (len(data) + 3) // 4,
               "limitations": list(context.LIMITATIONS)}
