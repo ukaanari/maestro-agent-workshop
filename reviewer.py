@@ -11,7 +11,6 @@ patch hashes. It cannot change task state, approve or export.
 """
 import codecs
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -45,12 +44,16 @@ FINDING = {"severity", "file", "line", "title", "observation", "conclusion"}
 SOURCE_ENCODINGS = frozenset(["ascii", "koi8-r", "koi8-u", "mac-roman"] +
                              ["iso8859-%d" % n for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16)] +
                              ["cp%d" % n for n in range(1250, 1259)])
+# PEP 263, as the interpreter applies it: a declaration on line 1, or on line 2 after a
+# blank or comment-only line 1. `python FILE` honours it whatever FILE is called.
+DECLARATION = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
+BLANK_OR_COMMENT = re.compile(rb"^[ \t\f]*(?:[#\r\n]|$)")
 PATCH_NOTE = ("The patch is not all UTF-8: each byte that is not appears here as U+FFFD. A file with a "
               "declared encoding carries its decoded text, and that encoding, under files.")
 
 
 class UnreadableSource(PolicyError):
-    """A changed Python file has no faithful text for the reviewer, so no review is launched."""
+    """Changed Python source has no faithful text for the reviewer, so no review is launched."""
 
 
 # Constructed, not inherited: the official CLI finds its subscription login via HOME
@@ -157,17 +160,32 @@ def claude_info(explicit=None):
     return {"path": path, "realpath": realpath, "version": version.stdout.decode("utf-8").strip()}
 
 
-def text_form(path, body):
-    """The reviewer's view of one file's bytes, and why a Python file has no text (or None).
+def python_source(path, lines):
+    """Named *.py or *.pyw (any case), or declaring an encoding where Python would read it."""
+    if path.lower().endswith((".py", ".pyw")):
+        return True
+    for number, line in enumerate(lines[:2]):
+        if DECLARATION.match(line):
+            return True
+        if number == 0 and not BLANK_OR_COMMENT.match(line):
+            return False
+    return False
 
-    UTF-8 is shown as text, as before. A Python file is read the way the interpreter reads
-    it (PEP 263): a declared encoding from SOURCE_ENCODINGS is decoded and named; any other
-    declaration, or bytes that do not decode, leave it without text. Other files that are
-    not UTF-8 stay `binary`: Git and their own tools treat them byte for byte.
+
+def text_form(path, body):
+    """The reviewer's view of one file's bytes, and why Python source has no text (or None).
+
+    UTF-8 is shown as text, as before. Python source is read the way the interpreter reads
+    it (PEP 263, with its own line splitting, so CR-only line endings count): a declared
+    encoding from SOURCE_ENCODINGS is decoded and named; any other declaration, or bytes
+    that do not decode, leave it without text. Other files that are not UTF-8 stay
+    `binary`: Git and their own tools treat them byte for byte.
     """
-    if path.endswith(".py"):
+    lines = body.splitlines(keepends=True)
+    python = python_source(path, lines)
+    if python:
         try:
-            declared = codecs.lookup(tokenize.detect_encoding(io.BytesIO(body).readline)[0]).name
+            declared = codecs.lookup(tokenize.detect_encoding(iter(lines).__next__)[0]).name
         except (SyntaxError, LookupError) as exc:
             return {"binary": True}, "no valid encoding declaration (%s)" % exc
         if declared not in ("utf-8", "utf-8-sig"):
@@ -180,16 +198,16 @@ def text_form(path, body):
     try:
         return {"content": body.decode("utf-8")}, None
     except UnicodeDecodeError:
-        return {"binary": True}, "bytes that are not valid UTF-8" if path.endswith(".py") else None
+        return {"binary": True}, "bytes that are not valid UTF-8" if python else None
 
 
 def require_text(changes, body):
-    """Fail closed before launch: every added or modified Python file reaches the reviewer as text."""
+    """Fail closed before launch: all added or modified Python source reaches the reviewer as text."""
     for change in changes:
         if change["status"] != "D":
             problem = text_form(change["path"], body(change["path"]))[1]
             if problem:
-                raise UnreadableSource("changed Python file %s has no faithful text for review: %s; review "
+                raise UnreadableSource("changed Python source %s has no faithful text for review: %s; review "
                                        "not launched" % (change["path"], problem))
 
 

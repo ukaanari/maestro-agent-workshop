@@ -34,15 +34,26 @@ LATIN1 = b"# -*- coding: latin-1 -*-\n# Caf\xe9 arithmetic\ndef add(a, b):\n    
 LEGACY = b"# -*- coding: latin-1 -*-\nGREETING = 'Gr\xfc\xdf Gott'\n"
 BINARY = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR binary asset"
 # Python accepts each of these declarations, but none can be shown faithfully: refused.
+UTF7 = b"# coding: utf-7\n# +AAo-print('HIDDEN')\nX = 1\n"
+ESCAPE = b"# coding: unicode_escape\n# \\x0aprint('HIDDEN')\nX = 1\n"
 REFUSED = {
-    "utf-7 (an ASCII comment that runs as code)": b"# coding: utf-7\n# +AAo-import os\nX = 1\n",
-    "unicode_escape (an ASCII comment that runs as code)": b"# coding: unicode_escape\n# \\x0aimport os\nX = 1\n",
+    "utf-7 (an ASCII comment that runs as code)": UTF7,
+    "unicode_escape (an ASCII comment that runs as code)": ESCAPE,
+    "CR-only line endings, declaration on line 2": b"\r# coding: utf-7\r# +AAo-print('HIDDEN')\rX = 1\r",
     "shift_jis (multibyte)": "# coding: shift_jis\nX = '表'\n".encode("shift_jis"),
     "utf-16": "# coding: utf-16\nX = 1\n".encode("utf-16"),
     "unknown declaration": b"# coding: klingon\nX = 1\n",
     "latin-1 bytes, no declaration": b"X = 'caf\xe9'\n",
     "bytes invalid for the declaration": b"# coding: cp1252\nX = '\x81'\n",
 }
+# Python source under other names: `python FILE` honours a declaration whatever FILE is called.
+REFUSED_ELSEWHERE = {
+    "bin/tool": b"#!/usr/bin/env python3\n" + UTF7,
+    "TOOL.PY": UTF7,
+    "LATIN.PY": REFUSED["latin-1 bytes, no declaration"],
+    "run.pyw": ESCAPE,
+}
+LEGACY_SCRIPT = b"#!/usr/bin/env python3\n# -*- coding: latin-1 -*-\nX = 'caf\xe9'\n"
 
 
 class TextFormTests(unittest.TestCase):
@@ -67,6 +78,34 @@ class TextFormTests(unittest.TestCase):
                 view, problem = reviewer.text_form("extra.py", body)
                 self.assertEqual(view, {"binary": True})
                 self.assertTrue(problem)
+
+    def test_python_source_is_recognised_by_name_or_where_python_reads_a_declaration(self):
+        for path, body in REFUSED_ELSEWHERE.items():
+            with self.subTest(path):
+                view, problem = reviewer.text_form(path, body)
+                self.assertEqual(view, {"binary": True})
+                self.assertTrue(problem)
+        self.assertEqual(reviewer.text_form("bin/legacy", LEGACY_SCRIPT),
+                         ({"content": LEGACY_SCRIPT.decode("latin-1"), "encoding": "iso8859-1"}, None))
+        # Not declarations Python reads (after a code line, or on line 3): plain text, as Python sees it.
+        for body in (b"x = 1\n# coding: utf-7\n", b"#!/bin/sh\n#\n# coding: utf-7\n"):
+            self.assertEqual(reviewer.text_form("notes.txt", body), ({"content": body.decode()}, None))
+        # Such a file is not Python source, so bytes that are not UTF-8 leave it `binary`, never refused.
+        self.assertEqual(reviewer.text_form("notes.txt", b"x = 1\n# coding: utf-7\ncaf\xe9\n"), ({"binary": True}, None))
+        declared_utf8 = "# coding: utf-8\ncafé\n".encode()
+        self.assertEqual(reviewer.text_form("notes.txt", declared_utf8), ({"content": declared_utf8.decode()}, None))
+
+    @RUNTIME
+    def test_every_refused_declaration_really_runs_hidden_code(self):
+        # The refusals match the supported interpreter: each of these runs a line its text hides.
+        cases = [("extra.py", REFUSED[name]) for name in REFUSED if "HIDDEN" in REFUSED[name].decode("latin-1")]
+        for path, body in cases + [(p, b) for p, b in REFUSED_ELSEWHERE.items() if b"HIDDEN" in b]:
+            with self.subTest(path=path, body=body[:30]), tempfile.TemporaryDirectory() as folder:
+                script = Path(folder) / path.replace("/", "_")
+                script.write_bytes(body)
+                run = subprocess.run([sys.executable, "-I", "-B", str(script)], capture_output=True, text=True)
+                self.assertIn("HIDDEN", run.stdout)
+                self.assertTrue(reviewer.text_form(path, body)[1])
 
     def test_the_allowlist_is_single_byte_and_ascii_compatible(self):
         ascii_text = "".join(map(chr, range(128)))
@@ -207,18 +246,30 @@ class PatchVisibilityTests(unittest.TestCase):
                 self.assertEqual((logo.get("binary"), "content" in logo), (True, False))
                 self.assert_export_reproduces_the_approved_tree(task_id)
 
-    def test_a_changed_python_file_without_faithful_text_is_never_sent(self):
+    def test_changed_python_source_without_faithful_text_is_never_sent(self):
+        cases = [("extra.py", name, body) for name, body in REFUSED.items()] + \
+                [(path, "by name or declaration", body) for path, body in REFUSED_ELSEWHERE.items()]
         for review_context in ("full", "scoped"):
-            for name, body in REFUSED.items():
-                with self.subTest(review_context=review_context, case=name):
-                    task_id = self.verified({"calc.py": UTF8, "extra.py": body}, review_context=review_context)
+            for path, name, body in cases:
+                with self.subTest(review_context=review_context, path=path, case=name):
+                    task_id = self.verified({"calc.py": UTF8, path: body}, review_context=review_context)
                     summary = self.engine.review(task_id, str(FAKE_CLAUDE))["review"]
                     self.assertEqual(summary["outcome"], "unavailable", summary)
-                    self.assertIn("changed Python file extra.py has no faithful text", summary["error"])
+                    self.assertIn("changed Python source %s has no faithful text" % path, summary["error"])
                     self.assertFalse((self.store.task_dir(task_id) / "review-1" / "fake-review.started").exists())
                     self.assertFalse((self.store.task_dir(task_id) / "review-1" / "input.txt").exists())
                     with self.assertRaisesRegex(PolicyError, "review required"):
                         self.engine.approve(task_id, self.store.get(task_id)["evidence"]["snapshot_sha256"], "human")
+
+    def test_python_source_without_a_py_name_is_shown_as_python_reads_it(self):
+        for review_context in ("full", "scoped"):
+            with self.subTest(review_context=review_context):
+                task_id = self.verified({"calc.py": UTF8, "bin/legacy": LEGACY_SCRIPT}, review_context=review_context)
+                summary, payload = self.reviewed(task_id)
+                self.assertEqual(summary["outcome"], "completed", summary)
+                script = next(f for f in payload["files"] if f["path"] == "bin/legacy")
+                self.assertEqual((script["content"], script["encoding"]), (LEGACY_SCRIPT.decode("latin-1"), "iso8859-1"))
+                self.assert_export_reproduces_the_approved_tree(task_id)
 
     def test_repository_attributes_cannot_be_reintroduced_through_git_metadata(self):
         task_id = self.verified({"calc.py": UTF8})

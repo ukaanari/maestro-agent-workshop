@@ -70,10 +70,10 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 159 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 162 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 12 Claude reviewer tests, 14 usability tests (verification layouts,
 `trusted check`, next steps, the project demo), 11 scoped-review tests, 13 privacy-guard tests
-and 10 patch-visibility tests, many with adversarial subcases. On interpreters other than macOS
+and 13 patch-visibility tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -304,13 +304,24 @@ Tasks started without `--review-model` behave exactly as before.
 * **Readable changes.** The reviewer, `trusted diff` and the export get the same patch,
   made with the repository's own `.gitattributes` ignored: `binary` or `-diff` cannot turn
   a source change into an opaque binary patch, while Git still marks real binary content
-  binary. `.git/info/attributes` is refused. A Python file is shown as the interpreter
-  reads it: UTF-8, or a declared single-byte, ASCII-compatible encoding (PEP 263), which
-  the input names. If an added or modified Python file uses any other encoding (UTF-7, an
-  escape codec, a multibyte encoding, undeclared non-UTF-8 bytes), the review is not
-  launched and the attempt is recorded as `unavailable`. Other files that are not UTF-8
-  are marked `binary` and appear byte for byte in the patch; a patch that is not all
-  UTF-8 carries a note saying so.
+  binary. `.git/info/attributes` is refused.
+* **Python source as Python reads it.** Python source means files named `*.py` or `*.pyw`
+  in any case, plus any other file that declares an encoding where Python reads one (PEP
+  263: line 1, or line 2 after a blank or comment line, with Python's own line endings),
+  because `python FILE` honours the declaration whatever FILE is called. It is shown as
+  UTF-8, or in a declared single-byte, ASCII-compatible encoding that the input names. If
+  added or modified Python source declares any other encoding (UTF-7, an escape codec, a
+  multibyte encoding) or has bytes that do not decode, the review is not launched and the
+  attempt is recorded as `unavailable`. Other files that are not UTF-8 are marked `binary`
+  and appear byte for byte in the patch; a patch that is not all UTF-8 carries a note.
+* **Exact bytes, not a safe display.** `trusted diff` prints, and the export writes, the
+  exact approved bytes: applied to the base, the patch reproduces the approved tree. A
+  terminal is not a faithful viewer of those bytes. It acts on control characters, so a
+  carriage return inside a Python line (a line break to Python) or an ANSI escape sequence
+  can hide code on screen, and it may garble bytes that are not UTF-8. Read a patch with
+  `trusted diff TASK_ID | cat -v`, which shows control characters as `^M` or `^[` and every
+  other non-ASCII byte as `M-…`, or in an editor that displays them. The reviewer's input
+  is JSON, where control characters appear escaped.
 * **Process.** The argv is fixed, the working directory is an empty `review-N/cwd`, and
   the environment is constructed: `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR`,
   `CLAUDE_CONFIG_DIR` when set, plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. API
@@ -355,9 +366,11 @@ Tasks started without `--review-model` behave exactly as before.
   which is recorded in the approval. A completed review is final. A second attempt is
   allowed only after one that did not complete.
 * **Limits.** The review is a model opinion, not proof of correctness, and prompt
-  injection in reviewed files can still influence it. Only `.py` files are decoded by
-  their declaration: other executable files that are not UTF-8 (shell scripts, `.pyw`,
-  code loaded with `exec`) are shown byte for byte. It never approves, exports or
+  injection in reviewed files can still influence it. Only Python source, as defined
+  above, is decoded by its declaration. Files run by other interpreters, code a program
+  loads from data and runs (for example `exec` of bytes read from a file) and compiled
+  files such as `.pyc` or native libraries (shown only as `binary`) reach the reviewer and
+  the human as their bytes, not necessarily as what runs. It never approves, exports or
   changes the snapshot. `tests/fixtures/fake_claude.py` is an explicit offline fixture:
   production never selects it, and its `offline-fixture` version satisfies the gate only
   for a test task with a test-context caller.

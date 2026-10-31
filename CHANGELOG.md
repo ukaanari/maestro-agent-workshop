@@ -16,18 +16,27 @@ describes work after the latest tag.
     neither the reviewer (full or scoped) nor the human's patch view showing its code.
   * Fix: every patch is made with attributes read from the empty tree
     (`git --attr-source`, Git 2.40 or newer; MAESTRO requires 2.42), and
-    `.git/info/attributes` is refused again whenever a patch is made. A Python file
+    `.git/info/attributes` is refused again whenever a patch is made. Python source (files
+    named `*.py` or `*.pyw` in any case, and any file that declares an encoding where
+    Python reads one, with Python's own line splitting, so CR-only line endings count)
     declaring a single-byte, ASCII-compatible encoding is decoded and the encoding named.
-    An added or modified Python file with any other encoding, or bytes that do not decode,
+    Added or modified Python source with any other encoding, or bytes that do not decode,
     makes the review `unavailable` before launch. A patch that is not all UTF-8 carries a
     note. UTF-8 inputs are byte-identical to before.
-  * Residual: other executable files that are not UTF-8 are shown byte for byte; Python
-    files in other legacy encodings cannot be reviewed; a review recorded before this fix on
-    a patch that attributes had made binary no longer matches and must be redone.
-  * 10 tests. 10 mutants all fail them: attribute source removed, metadata check removed,
-    no PEP 263 decoding, any codec accepted, a multibyte codec allowed, either fail-closed
-    check removed, scoped files shown as UTF-8 only, a lossy patch not flagged, and the
-    refusal recorded as `failed` instead of `unavailable`.
+  * Residual: files run by other interpreters, code loaded from data and compiled files are
+    shown as bytes, not as what runs; Python source in other legacy encodings cannot be
+    reviewed, and a non-Python file that declares an unsupported encoding where Python
+    would read it is refused as well (fail closed); `trusted diff` and the export carry the
+    exact bytes, but a terminal can hide or garble them (control characters, non-UTF-8
+    bytes), so read patches with `| cat -v`; a review recorded before this fix on a patch
+    that attributes had made binary no longer matches and must be redone.
+  * 13 tests, including a check that each refused declaration really runs hidden code under
+    the supported interpreter. 14 mutants all fail them: attribute source removed, metadata
+    check removed, no PEP 263 decoding, any codec accepted, a multibyte codec allowed,
+    either fail-closed check removed, scoped files shown as UTF-8 only, a lossy patch not
+    flagged, the refusal recorded as `failed`, declarations outside Python names ignored, a
+    case-sensitive suffix check, a declaration read after a code line, and newline-only
+    line splitting.
 * Reviewer output through `--json-schema`. The review must arrive as Claude Code's
   StructuredOutput call, checked by the CLI against a schema built from the contract; on a
   mismatch the CLI asks the model again within the same run instead of the review being
