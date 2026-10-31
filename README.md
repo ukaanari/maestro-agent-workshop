@@ -70,10 +70,10 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 149 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 159 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 12 Claude reviewer tests, 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), 11 scoped-review tests and 13 privacy-guard
-tests, many with adversarial subcases. On interpreters other than macOS
+`trusted check`, next steps, the project demo), 11 scoped-review tests, 13 privacy-guard tests
+and 10 patch-visibility tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -301,6 +301,16 @@ Tasks started without `--review-model` behave exactly as before.
   `review-N/input.txt`, hashed and sent on stdin. It contains no local paths and nothing
   from Codex's messages or session. The review contract tells the model that all of it
   is untrusted data.
+* **Readable changes.** The reviewer, `trusted diff` and the export get the same patch,
+  made with the repository's own `.gitattributes` ignored: `binary` or `-diff` cannot turn
+  a source change into an opaque binary patch, while Git still marks real binary content
+  binary. `.git/info/attributes` is refused. A Python file is shown as the interpreter
+  reads it: UTF-8, or a declared single-byte, ASCII-compatible encoding (PEP 263), which
+  the input names. If an added or modified Python file uses any other encoding (UTF-7, an
+  escape codec, a multibyte encoding, undeclared non-UTF-8 bytes), the review is not
+  launched and the attempt is recorded as `unavailable`. Other files that are not UTF-8
+  are marked `binary` and appear byte for byte in the patch; a patch that is not all
+  UTF-8 carries a note saying so.
 * **Process.** The argv is fixed, the working directory is an empty `review-N/cwd`, and
   the environment is constructed: `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TMPDIR`,
   `CLAUDE_CONFIG_DIR` when set, plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. API
@@ -345,7 +355,9 @@ Tasks started without `--review-model` behave exactly as before.
   which is recorded in the approval. A completed review is final. A second attempt is
   allowed only after one that did not complete.
 * **Limits.** The review is a model opinion, not proof of correctness, and prompt
-  injection in reviewed files can still influence it. It never approves, exports or
+  injection in reviewed files can still influence it. Only `.py` files are decoded by
+  their declaration: other executable files that are not UTF-8 (shell scripts, `.pyw`,
+  code loaded with `exec`) are shown byte for byte. It never approves, exports or
   changes the snapshot. `tests/fixtures/fake_claude.py` is an explicit offline fixture:
   production never selects it, and its `offline-fixture` version satisfies the gate only
   for a test task with a test-context caller.

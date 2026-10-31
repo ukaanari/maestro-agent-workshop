@@ -6,6 +6,28 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Security fix, independent audit finding AUD-03: a change could reach approval without its
+  code being readable.
+  * Preconditions: the implementer (or the repository) adds a `.gitattributes` rule such as
+    `*.py binary` or `*.py -diff`, which turned the Python diff into an opaque
+    `GIT binary patch` in the review input, `trusted diff` and the export; and saves the file
+    in a declared non-UTF-8 encoding (PEP 263, for example latin-1), which removed its text
+    from the review input. Together, an executed Python change passed verification with
+    neither the reviewer (full or scoped) nor the human's patch view showing its code.
+  * Fix: every patch is made with attributes read from the empty tree
+    (`git --attr-source`, Git 2.40 or newer; MAESTRO requires 2.42), and
+    `.git/info/attributes` is refused again whenever a patch is made. A Python file
+    declaring a single-byte, ASCII-compatible encoding is decoded and the encoding named.
+    An added or modified Python file with any other encoding, or bytes that do not decode,
+    makes the review `unavailable` before launch. A patch that is not all UTF-8 carries a
+    note. UTF-8 inputs are byte-identical to before.
+  * Residual: other executable files that are not UTF-8 are shown byte for byte; Python
+    files in other legacy encodings cannot be reviewed; a review recorded before this fix on
+    a patch that attributes had made binary no longer matches and must be redone.
+  * 10 tests. 10 mutants all fail them: attribute source removed, metadata check removed,
+    no PEP 263 decoding, any codec accepted, a multibyte codec allowed, either fail-closed
+    check removed, scoped files shown as UTF-8 only, a lossy patch not flagged, and the
+    refusal recorded as `failed` instead of `unavailable`.
 * Reviewer output through `--json-schema`. The review must arrive as Claude Code's
   StructuredOutput call, checked by the CLI against a schema built from the contract; on a
   mismatch the CLI asks the model again within the same run instead of the review being

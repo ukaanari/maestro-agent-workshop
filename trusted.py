@@ -296,9 +296,17 @@ def environment_record():
 
 
 def tree_patch(clone, home, snap):
-    # Both operands are trees: never built from live files.
-    return git(clone, home, "diff-tree", "-p", "--binary", "--no-ext-diff", "--no-textconv",
-               snap["base"] + "^{tree}", snap["tree"])
+    """The one patch for review, `trusted diff` and export.
+
+    Both operands are trees: never built from live files. Attributes are read from the
+    empty tree, so the repository's own .gitattributes (`binary`, `-diff`) cannot turn a
+    source change into an opaque binary patch; Git still recognises real binary content by
+    itself. clone_config refuses .git/info/attributes, the only attribute file left.
+    """
+    clone_config(clone)
+    empty_tree = git(clone, home, "hash-object", "-t", "tree", "--stdin").decode().strip()
+    return git(clone, home, "--attr-source=" + empty_tree, "diff-tree", "-p", "--binary", "--no-ext-diff",
+               "--no-textconv", snap["base"] + "^{tree}", snap["tree"])
 
 
 def changes(clone, home, snap):
@@ -921,7 +929,9 @@ class TrustedEngine:
                 record.update(found, outcome="completed")
             except (Exception, KeyboardInterrupt) as exc:
                 invalid = isinstance(exc, IntegrityError)
-                if record["outcome"] != "unavailable":
+                if isinstance(exc, reviewer.UnreadableSource):
+                    record["outcome"] = "unavailable"  # refused before launch, like an incomplete scoped context
+                elif record["outcome"] != "unavailable":
                     record["outcome"] = "failed"
                 record["error"] = (str(exc) or type(exc).__name__)[:2000]
             sha = self.store.artifact(task_id, "review.%d" % attempt, record)
