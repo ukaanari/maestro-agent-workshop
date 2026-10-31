@@ -329,10 +329,10 @@ Tasks started without `--review-model` behave exactly as before.
   default). If no call matches, the attempt fails. MAESTRO then validates the object with
   its own rules, including the echoed hashes, which the schema leaves out so the model
   must copy them from its input, and verifies the model from the CLI's own `modelUsage`
-  report. One live smoke test on the synthetic fixture (Claude Code 2.1.296,
-  `claude-sonnet-5-5`, every flag above) passed: the review arrived through StructuredOutput
-  on the first call and passed MAESTRO's validation. The CLI's retry after a mismatch was
-  not exercised live; it is covered offline only.
+  report. One authorized live smoke test on the synthetic fixture (a single call, Claude
+  Code 2.1.296, `claude-sonnet-5-5`, every flag above) passed: Claude Code returned a valid
+  `structured_output` on the first call and MAESTRO accepted it. The CLI's retry after a
+  mismatch was not exercised live; it is covered offline only.
 * **Record.** The `review.N` artifact holds the provider, CLI path and version, the
   requested and reported models, the snapshot, tree, patch and input hashes, the exit
   code, duration, output hashes and the validated review. `trusted status` shows the
@@ -391,14 +391,26 @@ and the export, and it is **not a full-repository review**.
 * **Offline measurement on tomli (about 1,000 files):** the full input is 437,968 bytes
   and the scoped input 61,679 bytes (13 files), with every manually chosen target file
   included.
-* **One live comparison (tomli #312, `claude-sonnet-5-5`):** on the same frozen snapshot
-  and patch, the earlier full review used 230,538 Claude input tokens and one scoped
-  review used 31,324, as reported by the CLI. Both returned `no_blocking_findings`.
+* **One live comparison on a correct patch (Sprint 06C, tomli #312, `claude-sonnet-5-5`):**
+  on the same frozen snapshot and patch, the earlier full review used 230,538 Claude input
+  tokens and one scoped review used 31,324 (86.4% fewer), as reported by the CLI. Both
+  returned `no_blocking_findings`.
   * This is a single sample of each, run about six hours apart, with different envelopes
     and contracts, on a patch already known to be correct.
   * It shows the scoped review neither invented problems nor contradicted the full one
-    here. It does not show that scoped reviews catch defects as well as full reviews;
-    that is not yet measured.
+    here. It does not show that scoped reviews are as good as full reviews.
+* **One live comparison on a defective patch (Sprint 06D, tomli #312, `claude-sonnet-5-5`):**
+  both reviewers got the same frozen, deliberately defective patch. It passes tomli's test
+  suite but rejects valid TOML (a document whose last line is a comment ending in a
+  backslash); an independent offline test confirms the defect. One run each, no retry:
+  * Full review: completed, `changes_requested`, with a blocking finding that names the
+    defect (230,678 input tokens).
+  * Scoped review: Claude's raw answer also named the defect as blocking (31,446 input
+    tokens), but it added an extra `null` key to a finding, so MAESTRO's strict validation
+    rejected it. Officially the scoped review failed, and that result stands. The
+    `--json-schema` output path above was built afterwards; it does not change this result.
+  * One run per side, on a defect visible in the changed file itself, is an anecdote, not a
+    detection rate. Equivalent review quality is not proven.
 
 <a id="reviewer-pilot"></a>
 **Reviewer pilot (27 October 2026).** Claude Code 2.1.296, signed in with a Claude Pro

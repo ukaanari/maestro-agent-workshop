@@ -9,12 +9,20 @@ describes work after the latest tag.
 * Reviewer output through `--json-schema`. The review must arrive as Claude Code's
   StructuredOutput call, checked by the CLI against a schema built from the contract; on a
   mismatch the CLI asks the model again within the same run instead of the review being
-  lost. In Sprint 06D a correct scoped review was discarded for one extra `null` key.
+  lost. In Sprint 06D a scoped review whose raw answer named the planted defect was
+  rejected for one extra `null` key; that result remains officially failed.
   MAESTRO's own validation is unchanged and still decides, the echoed hashes stay out of
   the schema, and reply text is no longer parsed as a review (so code-fenced replies no
   longer count). The contract now says "no other keys, not even with null values". Three
-  schema tests; 12 mutants all fail them or the reviewer tests. One live smoke test on the
-  synthetic fixture passed with every reviewer flag; the CLI's retry was not exercised live.
+  schema tests; 12 mutants all fail them or the reviewer tests. One authorized live smoke
+  test (a single call on the synthetic fixture, every reviewer flag) returned a valid
+  `structured_output` that MAESTRO accepted; the CLI's retry was not exercised live.
+* Sprint 06D live comparison on tomli #312 (one run each, no retry): both reviewers got the
+  same deliberately defective patch, which passes tomli's suite but rejects valid TOML. The
+  full review completed with a blocking finding naming the defect. The scoped review's raw
+  answer also named it, but failed MAESTRO's strict validation because of an extra `null`
+  key, so it is officially a failed review. An anecdote, not a detection rate; equivalent
+  review quality is not proven.
 * Scoped-context policy v2: tests that reach a changed module within three explicit import
   hops (for example through package initializers) are must-include. If one is omitted, the
   status is `incomplete-critical-context` and Claude is not launched. Implicit parent-package
@@ -44,10 +52,10 @@ describes work after the latest tag.
     reviews. Full context remains the default and is unchanged.
   * 9 tests; 131 offline tests in total. Offline tomli measurement: 437,968 to 61,679
     bytes.
-  * One live comparison on the frozen tomli #312 snapshot: 230,538 Claude input tokens
-    for the earlier full review and 31,324 for one scoped review, both
-    `no_blocking_findings`. This is a single sample on a correct patch; defect-detection
-    quality is not yet measured.
+  * One live comparison on the frozen tomli #312 snapshot (Sprint 06C): 230,538 Claude
+    input tokens for the earlier full review and 31,324 for one scoped review (86.4%
+    fewer), both `no_blocking_findings`. This is a single sample on a correct patch;
+    equivalent review quality is not proven (see the Sprint 06D entry above).
   * Known gap, closed by scoped-context policy v2 (below): tests that reached changed code
     only through its package were not treated as must-include.
 * Quickstart: the `M=…; $M doctor` lines failed in zsh, the default macOS shell, because
