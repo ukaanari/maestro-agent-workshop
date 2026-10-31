@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -32,9 +33,139 @@ CANARIES = {"ANTHROPIC_API_KEY": "test-only-sentinel", "ANTHROPIC_AUTH_TOKEN": "
             "OPENAI_API_KEY": "test-only-sentinel", "CODEX_HOME": "/test-only-sentinel",
             "GITHUB_TOKEN": "test-only-sentinel", "MAESTRO_CANARY_SECRET": "test-only-sentinel",
             "HTTPS_PROXY": "http://user:test-only-sentinel@127.0.0.1:9"}
+FIXTURE_FILES = {"TASK.md", "calc.py", "tests/test_calc.py"}
 ARGV = ["-p", "--output-format", "json", "--model", "test-reviewer", "--tools", "", "--strict-mcp-config",
         "--safe-mode", "--restricted", "--no-chrome", "--disable-slash-commands", "--no-session-persistence",
-        "--permission-mode", "dontAsk", "--system-prompt", reviewer.CONTRACT]
+        "--permission-mode", "dontAsk", "--json-schema",
+        json.dumps(reviewer.review_schema(FIXTURE_FILES), sort_keys=True, separators=(",", ":")),
+        "--system-prompt", reviewer.CONTRACT]
+
+
+def conforms(value, schema):
+    """The JSON Schema keywords review_schema uses, with Ajv's meaning (a bool is not an integer)."""
+    kinds = {"string": str, "array": list, "object": dict, "null": type(None)}
+    if "type" in schema:
+        types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+        if not any(type(value) is int if t == "integer" else isinstance(value, kinds[t]) for t in types):
+            return False
+    if "enum" in schema and not any(value == e and type(value) is type(e) for e in schema["enum"]):
+        return False
+    if isinstance(value, str) and (len(value) > schema.get("maxLength", len(value)) or
+                                   not re.search(schema.get("pattern", ""), value)):
+        return False
+    if type(value) is int and not schema.get("minimum", value) <= value <= schema.get("maximum", value):
+        return False
+    if isinstance(value, list) and (len(value) > schema.get("maxItems", len(value)) or
+                                    not all(conforms(v, schema.get("items", {})) for v in value)):
+        return False
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        if not set(schema.get("required", ())) <= set(value):
+            return False
+        if schema.get("additionalProperties", True) is False and not set(value) <= set(props):
+            return False
+        return all(conforms(v, props[k]) for k, v in value.items() if k in props)
+    return True
+
+
+class ReviewSchemaTests(unittest.TestCase):
+    """The schema is a first filter that the CLI enforces; validate_review stays the gate."""
+    SNAP, PATCH, CONTEXT = "a" * 64, "b" * 64, "c" * 64
+
+    def review(self, scoped=False):
+        review = {"snapshot_sha256": self.SNAP, "patch_sha256": self.PATCH, "verdict": "changes_requested",
+                  "summary": "One defect.", "findings": [{"severity": "blocking", "file": "calc.py", "line": 2,
+                                                         "title": "Wrong", "observation": "It subtracts.",
+                                                         "conclusion": "Use +."}]}
+        if scoped:
+            review["context_sha256"] = self.CONTEXT
+        return review
+
+    def verdicts(self, review, paths=("calc.py",), scoped=False):
+        try:
+            reviewer.validate_review(review, self.SNAP, self.PATCH, set(paths), self.CONTEXT if scoped else None)
+            validator = True
+        except PolicyError:
+            validator = False
+        return conforms(review, reviewer.review_schema(paths, scoped)), validator
+
+    def test_schema_and_validator_agree_on_every_contract_rule(self):
+        def changed(edit, scoped=False):
+            review = self.review(scoped)
+            edit(review, review["findings"][0])
+            return review
+        cases = {
+            "valid": (changed(lambda r, f: None), True),
+            "file null, line null": (changed(lambda r, f: f.update(file=None, line=None)), True),
+            "no findings": (changed(lambda r, f: r.update(findings=[], verdict="no_blocking_findings")), True),
+            "extra top-level key": (changed(lambda r, f: r.update(approved=True)), False),
+            "extra null finding key (Sprint 06D)": (changed(lambda r, f: f.update(conclusion_note=None)), False),
+            "missing finding key": (changed(lambda r, f: f.pop("line")), False),
+            "missing summary": (changed(lambda r, f: r.pop("summary")), False),
+            "unknown severity": (changed(lambda r, f: f.update(severity="critical")), False),
+            "unknown verdict": (changed(lambda r, f: r.update(verdict="approved")), False),
+            "title too long": (changed(lambda r, f: f.update(title="t" * 201)), False),
+            "blank observation": (changed(lambda r, f: f.update(observation="  \n ")), False),
+            "summary too long": (changed(lambda r, f: r.update(summary="s" * 2001)), False),
+            "file outside the input": (changed(lambda r, f: f.update(file="other.py")), False),
+            "line zero": (changed(lambda r, f: f.update(line=0)), False),
+            "line too large": (changed(lambda r, f: f.update(line=10 ** 7)), False),
+            "line boolean": (changed(lambda r, f: f.update(line=True)), False),
+            "line string": (changed(lambda r, f: f.update(line="2")), False),
+            "21 findings": (changed(lambda r, f: r.update(findings=[dict(f) for _ in range(21)])), False),
+            "hash not hex": (changed(lambda r, f: r.update(snapshot_sha256="not-a-hash")), False),
+            "findings not a list": (changed(lambda r, f: r.update(findings={})), False),
+        }
+        for name, (review, accepted) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.verdicts(review), (accepted, accepted))
+        with self.subTest("scoped"):
+            self.assertEqual(self.verdicts(self.review(scoped=True), scoped=True), (True, True))
+            self.assertEqual(self.verdicts(self.review(), scoped=True), (False, False))
+            self.assertEqual(self.verdicts(self.review(scoped=True)), (False, False))
+
+    def test_what_only_the_validator_checks(self):
+        # Echoed hashes stay out of the schema, so the model must copy them from its input.
+        wrong = self.review()
+        wrong["patch_sha256"] = "d" * 64
+        self.assertEqual(self.verdicts(wrong), (True, False))
+        schema = reviewer.review_schema(["calc.py"], scoped=True)
+        self.assertNotIn(self.SNAP, json.dumps(schema))
+        self.assertEqual(schema["properties"]["context_sha256"], {"type": "string", "pattern": "^[0-9a-f]{64}$"})
+        # Beyond SCHEMA_PATHS the schema only types the path; the validator still checks the set.
+        many = ["f%d.py" % i for i in range(reviewer.SCHEMA_PATHS + 1)]
+        outside = self.review()
+        outside["findings"][0]["file"] = "not-listed.py"
+        self.assertEqual(self.verdicts(outside, paths=many), (True, False))
+        self.assertEqual(reviewer.review_schema(many)["properties"]["findings"]["items"]["properties"]["file"],
+                         {"type": ["string", "null"]})
+        listed = reviewer.review_schema(many[:-1])["properties"]["findings"]["items"]["properties"]["file"]
+        self.assertEqual(listed, {"enum": sorted(many[:-1]) + [None]})
+
+    def test_argv_and_contracts(self):
+        schema = reviewer.review_schema(["calc.py"])
+        for scoped, contract in ((False, reviewer.CONTRACT), (True, reviewer.CONTRACT_SCOPED)):
+            argv = reviewer.argv("claude", "m", scoped, schema)
+            self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), schema)
+            self.assertEqual(argv[-2:], ["--system-prompt", contract])
+            self.assertIn("calling the StructuredOutput tool exactly once", contract)
+            self.assertIn("no others, not even with null values", contract)
+            self.assertIn("each with exactly these keys and no others", contract)
+            self.assertNotIn("You have no tools", contract)
+        # Each scoped replacement must have applied; a silent miss would weaken the scoped contract.
+        for added in ("This is a SCOPED review.", ' "context_sha256": copied from the input,',
+                      "(never a map-only or omitted path)"):
+            self.assertIn(added, reviewer.CONTRACT_SCOPED)
+            self.assertNotIn(added, reviewer.CONTRACT)
+        envelope = {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(self.review()),
+                    "modelUsage": {"m": {}}}
+        with self.assertRaisesRegex(PolicyError, "no StructuredOutput call"):
+            reviewer.parse_output(json.dumps(envelope).encode(), {})
+        envelope["structured_output"] = self.review()
+        self.assertEqual(reviewer.parse_output(json.dumps(envelope).encode(), {}), self.review())
+        envelope.update(subtype="error_max_structured_output_retries", is_error=True)
+        with self.assertRaisesRegex(PolicyError, "stopped retrying"):
+            reviewer.parse_output(json.dumps(envelope).encode(), {})
 
 
 @RUNTIME
@@ -165,8 +296,8 @@ class ClaudeReviewerTests(unittest.TestCase):
         self.assertEqual(self.status(task_id), "invalidated")
 
     def test_03_malformed_failed_or_unverified_reviews_never_satisfy_the_gate(self):
-        for scenario in ("malformed", "extra-field", "wrong-snapshot", "unknown-file", "error", "nonzero",
-                         "wrong-model"):
+        for scenario in ("malformed", "text-review", "schema-exhausted", "extra-field", "null-extra-key",
+                         "wrong-snapshot", "unknown-file", "error", "nonzero", "wrong-model"):
             with self.subTest(scenario=scenario):
                 task_id = self.verified(scenario)
                 summary = self.review(task_id)
@@ -178,13 +309,15 @@ class ClaudeReviewerTests(unittest.TestCase):
                 self.assertFalse(self.store.has_artifact(task_id, "approval"))
                 if scenario == "error":
                     self.assertIn("usage limit", summary["error"])
+                if scenario in ("malformed", "text-review"):  # reply text is never parsed as a review
+                    self.assertIn("no StructuredOutput call", summary["error"])
+                if scenario == "null-extra-key":  # the validator still refuses what the CLI should have
+                    self.assertIn("finding fields", summary["error"])
         task_id = self.verified("timeout")
         summary = self.review(task_id, timeout=0.5)
         self.assertEqual(summary["outcome"], "failed")
         self.assertIn("timed out", summary["error"])
         self.assertEqual(self.record(task_id)["group_cleanup"], "completed; escaped descendants not guaranteed")
-        task_id = self.verified("fenced")
-        self.assertEqual(self.review(task_id)["outcome"], "completed")
         # One retry after an attempt that did not complete; a completed review is final.
         task_id = self.verified()
         summary = self.engine.review(task_id, str(self.root / "missing-claude"))["review"]

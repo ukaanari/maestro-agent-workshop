@@ -6,6 +6,14 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Reviewer output through `--json-schema`. The review must arrive as Claude Code's
+  StructuredOutput call, checked by the CLI against a schema built from the contract; on a
+  mismatch the CLI asks the model again within the same run instead of the review being
+  lost. In Sprint 06D a correct scoped review was discarded for one extra `null` key.
+  MAESTRO's own validation is unchanged and still decides, the echoed hashes stay out of
+  the schema, and reply text is no longer parsed as a review (so code-fenced replies no
+  longer count). The contract now says "no other keys, not even with null values". Three
+  schema tests; 12 mutants all fail them or the reviewer tests. Not yet run against a live model.
 * Scoped-context policy v2: tests that reach a changed module within three explicit import
   hops (for example through package initializers) are must-include. If one is omitted, the
   status is `incomplete-critical-context` and Claude is not launched. Implicit parent-package

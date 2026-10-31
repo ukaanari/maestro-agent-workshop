@@ -960,6 +960,7 @@ class TrustedEngine:
             data, patch_sha256 = reviewer.build_input(task_id, task["spec"]["prompt"], snap, patch, files, bodies,
                                                       verification)
             allowed = set(bodies) | {f["path"] for f in files}
+        schema = reviewer.review_schema(allowed, scoped)
         staged = folder / "input.txt"
         atomic_write(staged, data)
         staged.chmod(0o400)
@@ -981,22 +982,23 @@ class TrustedEngine:
             record["outcome"] = "unavailable"
             raise PolicyError("reviewer unavailable: " + str(exc)) from exc
         model = task["spec"]["review"]["model"]
-        record.update(cli=info, environment=reviewer.environment_record(), argv=reviewer.argv(info["path"], model, scoped))
+        record.update(cli=info, environment=reviewer.environment_record(),
+                      argv=reviewer.argv(info["path"], model, scoped, schema))
         workdir = folder / "cwd"
         workdir.mkdir(mode=0o700)
         code = reviewer.run(info["path"], model, workdir, staged, folder, timeout,
-                            lambda: self.store.cancelled(task_id), record, scoped)
+                            lambda: self.store.cancelled(task_id), record, scoped, schema)
         if read_regular(staged, reviewer.MAX_INPUT)[0] != data:
             raise PolicyError("staged review input changed")
-        text = reviewer.parse_output(read_regular(folder / "stdout.json", reviewer.MAX_LOG)[0], record)
+        found = reviewer.parse_output(read_regular(folder / "stdout.json", reviewer.MAX_LOG)[0], record)
         if code:
             raise PolicyError("Claude Code exited with code %d" % code)
         record["model_verified"] = reviewer.model_verified(model, record["models_reported"])
         if not record["model_verified"]:
             raise PolicyError("review model not verified: requested %s, CLI reported %s"
                               % (model, record["models_reported"]))
-        review = reviewer.parse_review(text, snap["sha256"], patch_sha256, allowed,
-                                       scope["context_sha256"] if scoped else None)
+        review = reviewer.validate_review(found, snap["sha256"], patch_sha256, allowed,
+                                          scope["context_sha256"] if scoped else None)
         return {"review": review, "blocking": reviewer.blocking(review)}
 
     def annotate(self, task_id, evidence, message):

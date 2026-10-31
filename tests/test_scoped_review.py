@@ -226,6 +226,11 @@ class ScopedReviewEngineTests(unittest.TestCase):
         self.assertEqual((scope["mode"], scope["status"], scope["policy"]), ("scoped", "selected", context.POLICY))
         self.assertEqual(record["classification"], reviewer.SCOPED_CLASSIFICATION)
         self.assertEqual(record["argv"][-1], reviewer.CONTRACT_SCOPED)
+        schema = json.loads(record["argv"][record["argv"].index("--json-schema") + 1])
+        self.assertIn("context_sha256", schema["required"])
+        changed = {f["path"] for f in self.store.artifact(task_id, "changes")["files"]}
+        self.assertEqual(schema["properties"]["findings"]["items"]["properties"]["file"]["enum"],
+                         sorted(set(scope["included"]) | changed) + [None])
         for path in ("shop/checkout.py", "shop/money.py", "shop/gateway.py", "tests/test_checkout.py"):
             self.assertIn(path, scope["included"])
         self.assertFalse([p for p in scope["included"] if p.startswith("docs/")])

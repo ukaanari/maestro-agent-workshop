@@ -21,7 +21,7 @@ and that never hands an agent's output to a reviewer or a human without checking
 > **Status: experimental, pre-release, macOS only.**
 > Confined Mode runs **only deterministic, first-party fake agents**. Its real-agent
 > adapters still refuse. The separate [Trusted Local Mode](#trusted-local-mode-experimental)
-> can launch the official Codex CLI and, optionally, a tool-less Claude Code reviewer
+> can launch the official Codex CLI and, optionally, a Claude Code reviewer with no built-in tools
 > **with your user permissions**; only its verifier is confined. The automated suite runs
 > offline with fake agents. Live runs have passed only on small bundled fixtures
 > ([Codex pilot](#first-live-pilot), [two-agent run](#two-agent-run)).
@@ -63,15 +63,15 @@ flow documented below.
 | Explicit approval that must name the exact current snapshot hash | **Implemented, tested** |
 | Owned process groups, timeouts, cancellation, output limits; cleanup verifies that no live group member remains (descendants that leave the group are not covered, #2) | **Implemented, tested** |
 | Deny-default macOS Seatbelt confinement for agent processes (filesystem, network, process inspection, signals, exec allowlist, scrubbed env), with a fail-closed self-test before every launch | **Implemented, tested on macOS 26.7 (development Mac) and 26.6.2 (GitHub runner), arm64** |
-| Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI and, optionally, a fresh tool-less Claude Code reviewer, both unconfined (below). |
+| Real Codex CLI implementer / Claude Code reviewer adapters | **Not in Confined Mode.** Both adapters always refuse. Trusted Local runs the real Codex CLI and, optionally, a fresh Claude Code reviewer with no built-in tools, both unconfined (below). |
 | Running a project's own test suite as verification | **Not in Confined Mode** (fixed, data-only exact-content check). Trusted Local runs the project's `unittest` suite in Seatbelt, with an explicit layout (`--test-dir`, `--top-level-dir`, `--test-pattern`, `--pythonpath`). |
 | Working on an existing repository | **Not in Confined Mode** (a new synthetic Git repository per task). Trusted Local clones an existing local repository at a pinned commit. |
 | Linux / Windows | **Not supported.** No isolation backend; tasks end `blocked`. |
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 146 offline tests: the original 80 listed below, plus 19 Trusted Local
-acceptance tests, 9 Claude reviewer tests, 14 usability tests (verification layouts,
+The suite has 149 offline tests: the original 80 listed below, plus 19 Trusted Local
+acceptance tests, 12 Claude reviewer tests, 14 usability tests (verification layouts,
 `trusted check`, next steps, the project demo), 11 scoped-review tests and 13 privacy-guard
 tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
@@ -309,12 +309,12 @@ Tasks started without `--review-model` behave exactly as before.
   timeout is 600 seconds by default (at most 1,800) and each output stream is capped at 1 MiB.
 
   ```text
-  claude -p --output-format json --model <model> --tools "" --strict-mcp-config --safe-mode --restricted --no-chrome --disable-slash-commands --no-session-persistence --permission-mode dontAsk --system-prompt <review contract>
+  claude -p --output-format json --model <model> --tools "" --strict-mcp-config --safe-mode --restricted --no-chrome --disable-slash-commands --no-session-persistence --permission-mode dontAsk --json-schema <review schema> --system-prompt <review contract>
   ```
 
   Every flag was checked against `claude --help` of Claude Code 2.1.296. `--tools ""`
   removes all built-in tools, so the reviewer cannot read beyond its input or edit
-  anything. `--safe-mode`, `--restricted` and `--strict-mcp-config` skip CLAUDE.md,
+  anything. `--json-schema` adds one tool, StructuredOutput, which only returns the review. `--safe-mode`, `--restricted` and `--strict-mcp-config` skip CLAUDE.md,
   hooks, plugins, MCP servers and settings files. `--bare` is not used because it
   disables subscription login. None of this is OS confinement: like Codex, the reviewer
   process runs as your user.
@@ -322,7 +322,15 @@ Tasks started without `--review-model` behave exactly as before.
   (`no_blocking_findings` or `changes_requested`), a summary and at most 20 findings.
   Each finding has a severity (`blocking`, `major`, `minor`, `info`), file, line, an
   *observation* (what the input shows) and a *conclusion* (the reviewer's judgement).
-  MAESTRO validates it strictly and verifies the model from the CLI's own `modelUsage` report.
+  It must arrive as the input of one StructuredOutput call; reply text is never read as
+  a review. Claude Code checks that call against a JSON Schema built from the contract
+  (exact keys, allowed values, lengths, and the reviewable files when there are at most
+  256) and, on a mismatch, asks the model again within the same run (up to 5 times by
+  default). If no call matches, the attempt fails. MAESTRO then validates the object with
+  its own rules, including the echoed hashes, which the schema leaves out so the model
+  must copy them from its input, and verifies the model from the CLI's own `modelUsage`
+  report. This path is tested offline with the fixture reviewer only; it has not yet run
+  against a live model.
 * **Record.** The `review.N` artifact holds the provider, CLI path and version, the
   requested and reported models, the snapshot, tree, patch and input hashes, the exit
   code, duration, output hashes and the validated review. `trusted status` shows the
@@ -599,7 +607,7 @@ Nine small Python modules (about 2,800 lines in total):
 | `sandbox.py` | Seatbelt profile generation, execution policy validation, fail-closed self-test |
 | `agents.py` | Versioned IPC envelopes, disabled real adapters, deterministic fake worker |
 | `trusted.py` | Trusted Local mode: isolated clone, Codex CLI launch, snapshots, verification layouts, `check`, approval and export gates |
-| `reviewer.py` | Trusted Local Claude Code reviewer: fixed tool-less invocation, review input and strict output validation |
+| `reviewer.py` | Trusted Local Claude Code reviewer: fixed invocation without built-in tools, review input, review schema and strict output validation |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the lifecycle, trust boundaries and
 evidence chain, and [P1A-SECURITY.md](P1A-SECURITY.md) for the confinement design, what
