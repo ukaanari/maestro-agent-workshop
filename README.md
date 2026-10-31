@@ -329,8 +329,10 @@ Tasks started without `--review-model` behave exactly as before.
   default). If no call matches, the attempt fails. MAESTRO then validates the object with
   its own rules, including the echoed hashes, which the schema leaves out so the model
   must copy them from its input, and verifies the model from the CLI's own `modelUsage`
-  report. This path is tested offline with the fixture reviewer only; it has not yet run
-  against a live model.
+  report. One live smoke test on the synthetic fixture (Claude Code 2.1.296,
+  `claude-sonnet-5-5`, every flag above) passed: the review arrived through StructuredOutput
+  on the first call and passed MAESTRO's validation. The CLI's retry after a mismatch was
+  not exercised live; it is covered offline only.
 * **Record.** The `review.N` artifact holds the provider, CLI path and version, the
   requested and reported models, the snapshot, tree, patch and input hashes, the exit
   code, duration, output hashes and the validated review. `trusted status` shows the

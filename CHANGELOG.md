@@ -13,7 +13,8 @@ describes work after the latest tag.
   MAESTRO's own validation is unchanged and still decides, the echoed hashes stay out of
   the schema, and reply text is no longer parsed as a review (so code-fenced replies no
   longer count). The contract now says "no other keys, not even with null values". Three
-  schema tests; 12 mutants all fail them or the reviewer tests. Not yet run against a live model.
+  schema tests; 12 mutants all fail them or the reviewer tests. One live smoke test on the
+  synthetic fixture passed with every reviewer flag; the CLI's retry was not exercised live.
 * Scoped-context policy v2: tests that reach a changed module within three explicit import
   hops (for example through package initializers) are must-include. If one is omitted, the
   status is `incomplete-critical-context` and Claude is not launched. Implicit parent-package
