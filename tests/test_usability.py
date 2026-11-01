@@ -124,7 +124,7 @@ class UsabilityFlowTests(unittest.TestCase):
         self.assertEqual(self.engine.verify(task_id)["status"], "awaiting_approval", self.store.events(task_id))
         record = self.store.artifact(task_id, "verification")
         self.assertEqual(record["command"], trusted.verification_command(LAYOUT))
-        self.assertEqual(record["summary"], {"tests_run": 8, "failures": 0, "errors": 0, "skipped": 0})
+        self.assertEqual(record["summary"], {"tests_run": 8, "executed": 8, "failures": 0, "errors": 0, "skipped": 0})
         self.assertEqual(self.store.get(task_id)["spec"]["verify"], LAYOUT)
         task_id = self.implemented("flawed")
         self.assertEqual(self.engine.verify(task_id)["status"], "failed")

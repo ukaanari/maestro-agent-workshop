@@ -33,21 +33,38 @@ RUNTIME = unittest.skipUnless(sys.platform == "darwin" and sys.version_info[:2] 
 FIX = b"def add(a, b):\n    return a + b\n"
 NO_TESTS = b"import unittest\n"
 EXIT_EARLY = b"import os\nos._exit(0)\n"
+# unittest counts skipped tests in testsRun, and each skipped subtest in `skipped`.
+ALL_SKIPPED = {
+    "every test skipped": b"import unittest\nclass T(unittest.TestCase):\n    @unittest.skip('x')\n    def test_a(self): pass\n"
+                          b"    @unittest.skip('x')\n    def test_b(self): pass\n",
+    "skipTest in the body": b"import unittest\nclass T(unittest.TestCase):\n    def test_a(self): self.skipTest('x')\n",
+    "class skipped": b"import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\nT = unittest.skip('x')(T)\n",
+    "module skipped at import": b"import unittest\nraise unittest.SkipTest('missing dependency')\n",
+    "every subtest skipped": b"import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        for i in range(3):\n"
+                             b"            with self.subTest(i=i): self.skipTest('x')\n",
+}
+PARTLY_SKIPPED = {
+    "one test passes, one is skipped": b"import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\n"
+                                       b"    @unittest.skip('x')\n    def test_b(self): pass\n",
+    "one subtest passes, one is skipped": b"import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n"
+                                          b"        with self.subTest(i=0): self.skipTest('x')\n"
+                                          b"        with self.subTest(i=1): self.assertTrue(True)\n",
+}
 OLD_DEFAULT = [python_runtime()[0], "-I", "-B", "-m", "unittest", "discover", "-s", "tests"]
 LAYOUT = trusted.verify_config(test_dir="tests")
 
 
 def forged(**counts):
     """A test module that prints the runner's count line itself and exits before any test runs."""
-    line = json.dumps(dict({"tests_run": 0, "failures": 0, "errors": 0, "skipped": 0}, **counts)) + "\n"
+    line = json.dumps(dict({"tests_run": 0, "executed": 0, "failures": 0, "errors": 0, "skipped": 0}, **counts)) + "\n"
     return ("import os, sys\nsys.stdout.write(%r)\nsys.stdout.flush()\nos._exit(0)\n" % line).encode()
 
 
 class CountedTests(unittest.TestCase):
     def test_a_zero_exit_needs_counts_showing_a_passing_run(self):
-        ok = {"tests_run": 3, "failures": 0, "errors": 0, "skipped": 1}
+        ok = {"tests_run": 3, "executed": 2, "failures": 0, "errors": 0, "skipped": 1}
         self.assertEqual(trusted.counted(ok), ok)
-        for summary in (None, dict(ok, tests_run=0), dict(ok, failures=1), dict(ok, errors=2)):
+        for summary in (None, dict(ok, tests_run=1), dict(ok, executed=0), dict(ok, failures=1), dict(ok, errors=2)):
             with self.subTest(summary=summary), self.assertRaises(PolicyError):
                 trusted.counted(summary)
 
@@ -98,7 +115,11 @@ class ZeroTestVerificationTests(unittest.TestCase):
         cases = [("tests emptied", NO_TESTS, "MAESTRO: no tests ran"),
                  ("exits before reporting", EXIT_EARLY, "without the runner's test counts"),
                  ("forged count line: zero tests", forged(), "do not show a passing run"),
-                 ("forged count line: a failure", forged(tests_run=2, failures=1), "do not show a passing run")]
+                 ("forged count line: none executed", forged(tests_run=2, skipped=2), "do not show a passing run"),
+                 ("forged count line: more executed than run", forged(executed=1), "do not show a passing run"),
+                 ("forged count line: a failure", forged(tests_run=2, executed=2, failures=1), "do not show a passing run")]
+        cases += [(name, body, "MAESTRO: no test executed: every test that ran was skipped")
+                  for name, body in ALL_SKIPPED.items()]
         for verify in (None, LAYOUT):
             for name, body, message in cases:
                 with self.subTest(layout=verify is not None, case=name):
@@ -115,7 +136,7 @@ class ZeroTestVerificationTests(unittest.TestCase):
                 task_id = self.task(verify=verify, review_model="test-reviewer", review_context=review_context)
                 self.assertEqual(self.store.get(task_id)["status"], "awaiting_approval")
                 summary = self.store.artifact(task_id, "verification")["summary"]
-                self.assertEqual(summary, {"tests_run": 1, "failures": 0, "errors": 0, "skipped": 0})
+                self.assertEqual(summary, {"tests_run": 1, "executed": 1, "failures": 0, "errors": 0, "skipped": 0})
                 self.assertEqual(self.engine.status(task_id)["verification"],
                                  {"passed": True, "exit_code": 0, "summary": summary})
                 self.assertEqual(self.engine.review(task_id, str(FAKE_CLAUDE))["review"]["outcome"], "completed")
@@ -124,9 +145,20 @@ class ZeroTestVerificationTests(unittest.TestCase):
                 self.assertEqual(json.loads(staged.split(b"\n", 1)[1])["verification"]["summary"], summary)
                 self.assertEqual(self.engine.approve(task_id, self.sha(task_id), "human")["status"], "approved")
 
+    def test_suites_with_some_skips_pass_and_report_what_executed(self):
+        for verify in (None, LAYOUT):
+            for name, body in PARTLY_SKIPPED.items():
+                with self.subTest(layout=verify is not None, case=name):
+                    task_id = self.task(body, verify=verify)
+                    self.assertEqual(self.store.get(task_id)["status"], "awaiting_approval", self.store.events(task_id))
+                    summary = self.store.artifact(task_id, "verification")["summary"]
+                    self.assertEqual((summary["tests_run"], summary["executed"], summary["skipped"]), (
+                        (2, 1, 1) if name.startswith("one test") else (1, 1, 1)))
+
     def test_trusted_check_reports_a_baseline_without_counted_tests_as_failing(self):
         for name, tests, passed, reason in (("passing tests", None, True, None),
                                             ("no tests", NO_TESTS, False, None),
+                                            ("every test skipped", ALL_SKIPPED["every test skipped"], False, None),
                                             ("exits before reporting", EXIT_EARLY, False, "without the runner's test counts")):
             with self.subTest(name):
                 source = self.root / ("check-src-" + name.replace(" ", "-"))
@@ -141,7 +173,7 @@ class ZeroTestVerificationTests(unittest.TestCase):
                 baseline = trusted.check(repo, fixture.make_fixture(repo, source))["baseline"]
                 self.assertIs(baseline["passed"], passed, baseline)
                 if passed:
-                    self.assertEqual(baseline["summary"]["tests_run"], 1)
+                    self.assertEqual((baseline["summary"]["tests_run"], baseline["summary"]["executed"]), (1, 1))
                 if reason:
                     self.assertIn(reason, baseline["reason"])
 
@@ -177,7 +209,7 @@ class ZeroTestVerificationTests(unittest.TestCase):
     def test_a_hostile_implementer_can_still_forge_a_passing_run(self):
         # The documented limit, pinned so the count check is never mistaken for a security
         # boundary: test code prints a passing count line and exits before any test runs.
-        task_id = self.task(forged(tests_run=5))
+        task_id = self.task(forged(tests_run=5, executed=5))
         self.assertEqual(self.store.get(task_id)["status"], "awaiting_approval")
         self.assertEqual(self.store.artifact(task_id, "verification")["summary"]["tests_run"], 5)
 

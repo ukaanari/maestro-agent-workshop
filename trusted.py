@@ -45,17 +45,45 @@ def validate_model(model):
 SAFE_DIR = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 SAFE_PATTERN = re.compile(r"[A-Za-z0-9_*?][A-Za-z0-9_.*?-]*\.py")
 # A fixed program, never built from configuration: validated paths arrive as separate
-# argv items. It reports counts on stdout and fails when no test ran.
+# argv items. It reports counts on stdout and fails unless a test executed. unittest's
+# testsRun includes skipped tests and its skipped count includes each skipped subtest, so
+# `executed` is counted per test as it stops: a started test counts unless it was skipped
+# as a whole, or every subtest it reported was skipped.
 VERIFY_RUNNER = (
     "import json, os, sys, unittest\n"
+    "from unittest.case import _SubTest\n"
     "i = sys.argv.index('--')\n"
     "sys.path[:0] = [os.path.abspath(p) for p in sys.argv[1:i]]\n"
-    "r = unittest.main(module=None, argv=['python -m unittest', 'discover'] + sys.argv[i + 1:], exit=False).result\n"
-    "print(json.dumps({'tests_run': r.testsRun, 'failures': len(r.failures), 'errors': len(r.errors),"
-    " 'skipped': len(r.skipped)}))\n"
+    "class Result(unittest.TextTestResult):\n"
+    "    executed, current = 0, None  # current: [test, skipped whole, subtests skipped, other subtests]\n"
+    "    def startTest(self, test):\n"
+    "        self.current = [test, 0, 0, 0]\n"
+    "        super().startTest(test)\n"
+    "    def addSkip(self, test, reason):\n"
+    "        sub = isinstance(test, _SubTest)\n"
+    "        if self.current and self.current[0] is (test.test_case if sub else test):\n"
+    "            self.current[2 if sub else 1] += 1\n"
+    "        super().addSkip(test, reason)\n"
+    "    def addSubTest(self, test, subtest, err):\n"
+    "        if self.current and self.current[0] is test:\n"
+    "            self.current[3] += 1\n"
+    "        super().addSubTest(test, subtest, err)\n"
+    "    def stopTest(self, test):\n"
+    "        c = self.current\n"
+    "        if c and c[0] is test and not c[1] and (c[3] or not c[2]):\n"
+    "            self.executed += 1\n"
+    "        self.current = None\n"
+    "        super().stopTest(test)\n"
+    "runner = type('Runner', (unittest.TextTestRunner,), {'resultclass': Result})\n"
+    "r = unittest.main(module=None, argv=['python -m unittest', 'discover'] + sys.argv[i + 1:], exit=False,\n"
+    "                  testRunner=runner).result\n"
+    "print(json.dumps({'tests_run': r.testsRun, 'executed': r.executed, 'failures': len(r.failures),"
+    " 'errors': len(r.errors), 'skipped': len(r.skipped)}))\n"
     "if not r.testsRun:\n"
     "    print('MAESTRO: no tests ran', file=sys.stderr)\n"
-    "sys.exit(0 if r.wasSuccessful() and r.testsRun else 1)\n")
+    "elif not r.executed:\n"
+    "    print('MAESTRO: no test executed: every test that ran was skipped', file=sys.stderr)\n"
+    "sys.exit(0 if r.wasSuccessful() and r.executed else 1)\n")
 
 
 def verify_config(test_dir=None, top_level_dir=None, pattern=None, pythonpath=None):
@@ -387,21 +415,23 @@ def runner_summary(output):
         value = json.loads(lines[-1]) if lines else None
     except ValueError:
         return None
-    keys = {"tests_run", "failures", "errors", "skipped"}
+    keys = {"tests_run", "executed", "failures", "errors", "skipped"}
     if not isinstance(value, dict) or set(value) != keys or any(type(value[k]) is not int for k in keys):
         return None
     return value
 
 
 def counted(summary):
-    """A zero exit passes only with the runner's own counts: at least one test, none failing.
+    """A zero exit passes only with the runner's own counts: a test executed, none failing.
 
-    This catches emptied tests or a process that exits before reporting. It cannot stop a
-    hostile implementer: the code under test runs in that process and can print the line.
+    This catches emptied or entirely skipped tests, or a process that exits before
+    reporting. It cannot stop a hostile implementer: the code under test runs in that
+    process and can print the line.
     """
     if summary is None:
         raise PolicyError("verification exited 0 without the runner's test counts (did the test process exit early?)")
-    if summary["tests_run"] < 1 or summary["failures"] or summary["errors"]:
+    if (summary["executed"] < 1 or summary["executed"] > summary["tests_run"] or
+            summary["failures"] or summary["errors"]):
         raise PolicyError("verification counts do not show a passing run: " + json.dumps(summary, sort_keys=True))
     return summary
 

@@ -16,23 +16,27 @@ describes work after the latest tag.
     was never told how many tests ran.
   * Fix: every run, with or without options, goes through the constant runner (without
     options it discovers exactly as before, `-s tests`). A zero exit passes only with the
-    runner's count line showing at least one test and no failure or error; verification,
-    `trusted check` and approval all require it. Counts are shown by `trusted status` and
+    runner's count line showing at least one executed test and no failure or error;
+    verification, `trusted check` and approval all require it. unittest counts skipped
+    tests as run and counts each skipped subtest separately, so the runner counts per test:
+    a test is executed unless it was skipped, or every subtest it reported was skipped. A
+    suite where everything is skipped therefore fails. Counts are shown by `trusted status` and
     sent to the reviewer, in both full and scoped review.
   * Compatibility: this supersedes the v0.4.0 note that without options "the original fixed
-    command and task identity are unchanged". The default command is part of a task's
-    identity, so a task started without options gets a new identity, and one started before
-    this change is refused at verification or approval (fail closed) and must be restarted.
+    command and task identity are unchanged". The verification command, runner included, is
+    part of a task's identity; both the default command and the runner changed, so every
+    task started before this change, with or without layout options, gets refused at
+    verification or approval (fail closed) and must be restarted.
   * Residual: the test code runs in the process that prints the counts, so a hostile
     implementer can still forge a passing line and exit. The count check catches honest
     mistakes, not forgery.
-  * 7 tests: emptied tests, an early exit and forged zero or failing counts, with and without
-    layout options; counts in status, approval and full and scoped review; `trusted check`;
-    tasks recorded with the old command refused; approval needing the counts; and the
-    forgeable limit, pinned. The test that kept the old default command now pins the new
-    one. 9 mutants all fail them: old default command, counts ignored by verify, check or
-    approval, zero tests or failures accepted, counts missing from the full or scoped
-    reviewer input or from status.
+  * 8 tests: emptied tests, an early exit, entirely skipped suites (decorator, `skipTest`,
+    class, module, every subtest) and forged zero, unexecuted or failing counts, with and
+    without layout options; partly skipped suites passing with the right counts; counts in
+    status, approval and full and scoped review; `trusted check`; tasks recorded with the
+    old command refused; approval needing the counts; and the forgeable limit, pinned. The
+    test that kept the old default command now pins the new one. 14 mutants all fail them,
+    including each part of the runner's per-test executed count.
 * Security fix, independent audit finding AUD-03: a change could reach approval without its
   code being readable.
   * Preconditions: the implementer (or the repository) adds a `.gitattributes` rule such as
