@@ -407,25 +407,29 @@ and the export, and it is **not a full-repository review**.
 * **Imports resolved as verification runs them (policy v3).** Imports resolve against the
   task's verification layout: the top-level directory (the test directory when none is
   given) and each `--pythonpath` entry, in the order Python searches them. A regular
-  package or module in an earlier entry shadows a later one, and namespace packages
-  merge. Only names that resolve to no file there fall back to the earlier rule (the
-  repository root and `src/`), so flat and `src/` layouts keep their selection. On the
-  preserved tomli snapshots the selected files and their bytes are unchanged; the full
-  reviewer input is not, because it carries the policy version and the limitation text,
-  so its bytes and context digest change. Tests are also recognised by the task's own
-  `--test-dir` and `--test-pattern`. In addition:
+  package or module in an earlier entry shadows a later one, and PEP 420 namespace
+  package portions merge across roots for both absolute and relative imports while
+  keeping regular packages confined to their own root. Only names that resolve to no
+  file there fall back to the earlier rule (the repository root and `src/`), so flat and
+  `src/` layouts keep their selection. On the preserved tomli snapshots the selected
+  files and their bytes are unchanged; the full reviewer input is not, because it
+  carries the policy version and the limitation text, so its bytes and context digest
+  change. Tests are also recognised by the task's own `--test-dir` and `--test-pattern`.
+  In addition:
   * a test that enters a package whose `__init__.py` changed, within the same three
     hops, is must-include, because importing any submodule runs that initializer;
   * for `from package import name` in a changed file, the file the package's
     initializer takes `name` from (also under `try`/`if`, or through `import *`) is
     must-include, following at most two initializers;
-  * an absolute import that resolves to no file, while a file with that module path
-    sits in a plain directory outside every package and outside the layout, stops the
-    review as `unresolved-imports` when the importing file is inside that directory or
-    the file found there is changed. Such a directory is a `sys.path` entry the layout
-    does not declare (for example a test package that edits `sys.path`). Standard-library
-    names and imports with no such file, such as third-party packages, are never
-    reported. Restart the task with the matching layout, or use the full context.
+  * an absolute import candidate that resolves to no file (distinguishing an empty
+    namespace directory from an actual resolved module or submodule), while a file with
+    that module path sits in a plain directory outside every package and outside the
+    layout, stops the review as `unresolved-imports` when the file found there is
+    changed, or when a changed file is inside that directory or imports/references a
+    symbol from that file. Such a directory is a `sys.path` entry the layout does not
+    declare (for example a test package that edits `sys.path`). Unchanged, unrelated
+    scripts and embedded fixtures, standard-library names and third-party packages are
+    never reported. Restart the task with the matching layout, or use the full context.
   A scoped review recorded under an earlier policy never approves: reject the task and
   start it again.
 * **Recorded:** the `review.N` artifact holds the policy version, budget, status,

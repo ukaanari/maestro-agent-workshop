@@ -22,21 +22,25 @@ describes work after the latest tag.
     * Imports resolve against the task's verification layout first, in the order Python
       searches it: the top-level directory (the test directory when none is given), then
       each `--pythonpath` entry. A regular package or module in an earlier entry shadows
-      a later one, and namespace packages merge. A resolver test checks seven collision
-      layouts against what Python itself imports. Names that resolve to no file there
-      fall back to the root and `src/` rule, so ordinary layouts keep their graph.
+      a later one, and PEP 420 namespace package portions merge across roots for both
+      absolute and relative imports while keeping regular packages confined to their own
+      root. A resolver test checks eight collision layouts against what Python itself
+      imports. Names that resolve to no file there fall back to the root and `src/`
+      rule, so ordinary layouts keep their graph.
     * A test entering a package whose `__init__.py` changed is must-include, within the
       unchanged three-hop bound.
     * For names a changed file imports from a package, the file the initializer takes
       each name from is must-include (also under `try`/`if` and through `import *`, at
       most two initializers deep). Names that are not imported are not followed.
-    * New refusal `unresolved-imports`: an absolute import that resolves to no file,
-      while a file with that module path sits in a plain directory outside every
-      package and outside the layout, stops the review when the importing file or the
-      file found there is changed or inside that directory. Standard-library names and
-      imports with no such file, such as third-party packages, are never reported. The
-      reviewer is not launched, the attempt is `unavailable`, and the message names the
-      imports.
+    * New refusal `unresolved-imports`: an absolute import candidate that resolves to no
+      file (distinguishing an empty namespace directory from an actual resolved module or
+      submodule), while a file with that module path sits in a plain directory outside
+      every package and outside the layout, stops the review when the found file is
+      changed, or when a changed file is inside that directory or imports/references a
+      symbol from that file. Unchanged, unrelated scripts and embedded fixtures (such as
+      `examples/trusted-local/fixture`), standard-library names and third-party packages
+      are never reported. The reviewer is not launched, the attempt is `unavailable`, and
+      the message names the imports.
     * Tests are also recognised by the task's test directory and file pattern.
   * Token efficiency, measured offline on the exact reviewer input of both preserved tomli
     scoped tasks (1,011 files, `src/` layout) under `main` and under this change:
@@ -57,17 +61,16 @@ describes work after the latest tag.
   * Residual: chains longer than three hops, re-exports deeper than two initializers or
     through ordinary modules, dynamic imports, and a local file that shadows a
     standard-library module from an undeclared directory are not detected.
-  * 11 tests: the audit's lib/backend layouts, an undeclared root (in the selector and
-    end to end, with a test package that edits `sys.path`), standard-library and
-    third-party imports beside local look-alikes, root precedence and name collisions
-    checked against Python, a default-layout test helper shadowing a root module, a
-    changed initializer reached through submodules (and the hop bound kept), the
-    re-export cases, custom test directories and patterns, the layout reaching the
-    selector end to end, and an earlier-policy review refused at approval. Of 31 mutants,
-    30 fail them. The survivor drops the "changed `__init__.py` only" filter on package
-    expansion. It appears equivalent but is not proven so: it can only add must-include
-    tests, never drop one, and only when a changed module shares its dotted name with a
-    directory, a layout no test covers.
+  * 15 tests: the audit's lib/backend layouts, an undeclared root (in the selector, from a
+    changed importer outside the undeclared root, across a namespace directory, and end to
+    end with a test package that edits `sys.path`), unrelated scripts and MAESTRO's own
+    tracked fixture not blocking a scoped review, standard-library and third-party imports
+    beside local look-alikes, root precedence and name collisions checked against Python,
+    relative imports across PEP 420 namespace package portions, a default-layout test
+    helper shadowing a root module, a changed initializer reached through submodules (with
+    the hop bound and module/directory collision invariants kept), the re-export cases,
+    custom test directories and patterns, the layout reaching the selector end to end, and
+    an earlier-policy review refused at approval. All 42 mutants fail them.
 * Security fix, independent audit finding AUD-01: verification could pass with no test run.
   * Behaviour before: without layout options, verification ran
     `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test

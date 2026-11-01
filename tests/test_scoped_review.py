@@ -188,12 +188,148 @@ class ScopedLayoutTests(unittest.TestCase):
 
     def test_an_undeclared_import_root_fails_closed(self):
         for budget in (400000, 12000):
-            selection = scoped(shop_files(4000, "lib/"), {"lib/shop/checkout.py": DEFECT}, budget)
+            selection = scoped(shop_files(4000, "lib/"), {"lib/shop/checkout.py": DEFECT + "import shop.reports\n"}, budget)
             self.assertEqual(selection["status"], "unresolved-imports")
             self.assertIn("lib/shop/checkout.py imports shop.gateway (lib/shop/gateway.py)",
                           selection["unresolved_imports"])  # the importer sits in the undeclared root
+            self.assertIn("lib/shop/checkout.py imports shop.reports (lib/shop/reports.py)",
+                          selection["unresolved_imports"])
             self.assertIn("tests/test_checkout.py imports shop.checkout (lib/shop/checkout.py)",
                           selection["unresolved_imports"])  # the changed file sits in it
+
+    def test_changed_importer_outside_undeclared_root_fails_closed(self):
+        # B-01: the changed importer lives in a declared root, while the unchanged helper it imports
+        # sits inside an undeclared plain directory.
+        base = {
+            "app/__init__.py": "",
+            "app/checkout.py": (
+                "import shop.gateway\n"
+                "from shop.money import to_cents\n\n"
+                "def checkout(total):\n"
+                "    return shop.gateway.charge(to_cents(total))\n"
+            ),
+            "lib/shop/__init__.py": "",
+            "lib/shop/gateway.py": "def charge(cents):\n    return {'charged': cents}\n",
+            "lib/shop/money.py": "from .rates import to_cents\n" + "# pad\n" * 4000,
+            "lib/shop/rates.py": "def to_cents(amount):\n    return int(round(amount * 100))\n",
+            "tests/__init__.py": "",
+            "tests/test_checkout.py": "import unittest\nfrom app.checkout import checkout\n",
+        }
+        change = {
+            "app/checkout.py": (
+                "import shop.gateway\n"
+                "from shop.money import to_cents\n\n"
+                "def checkout(total, discount=0):\n"
+                "    return shop.gateway.charge(total - discount)\n"
+            )
+        }
+        layout = trusted.verify_config(top_level_dir=".")
+        for budget in (400000, 12000):
+            selection = scoped(base, change, budget, layout)
+            self.assertEqual(selection["status"], "unresolved-imports")
+            self.assertIn("app/checkout.py imports shop.gateway (lib/shop/gateway.py)",
+                          selection["unresolved_imports"])
+            self.assertIn("app/checkout.py imports shop.money (lib/shop/money.py)",
+                          selection["unresolved_imports"])
+
+    def test_namespace_directory_does_not_mask_unresolved_submodule_imports(self):
+        # B-02: a namespace directory (tests/shop/) makes resolver.resolve("shop") return set();
+        # per-candidate resolution must still check shop.gateway and shop.money.
+        base = shop_files(4000, "lib/")
+        base["tests/shop/test_checkout.py"] = base.pop("tests/test_checkout.py")
+        change = {
+            "lib/shop/checkout.py": (
+                "from shop import gateway, money\n\n"
+                "def checkout(total, discount=0):\n"
+                "    return gateway.charge(money.to_cents(total - discount))\n"
+            )
+        }
+        for budget in (400000, 12000):
+            selection = scoped(base, change, budget)
+            self.assertEqual(selection["status"], "unresolved-imports")
+            self.assertIn("lib/shop/checkout.py imports shop.gateway (lib/shop/gateway.py)",
+                          selection["unresolved_imports"])
+            self.assertIn("lib/shop/checkout.py imports shop.money (lib/shop/money.py)",
+                          selection["unresolved_imports"])
+        # When one submodule resolves in a configured namespace portion and another sits only in
+        # an undeclared root, only the unresolved submodule is flagged even if the undeclared root
+        # also holds a shadowed copy of the resolved one.
+        partial = {
+            "shop/a.py": "def ok():\n    return 1\n",
+            "lib/shop/a.py": "def ok():\n    return 0\n",
+            "lib/shop/b.py": "def hidden():\n    return 2\n",
+            "app.py": "from shop import a\n",
+            "tests/__init__.py": "",
+            "tests/test_app.py": "import unittest\nimport app\n",
+        }
+        selection = scoped(partial, {"app.py": "from shop import a, b\n\ndef run():\n    return a.ok() + b.hidden()\n"},
+                           layout=trusted.verify_config(top_level_dir="."))
+        self.assertEqual(selection["status"], "unresolved-imports")
+        self.assertIn("shop/a.py", selection["critical"])
+        self.assertEqual(selection["unresolved_imports"], ["app.py imports shop.b (lib/shop/b.py)"])
+
+    def test_unrelated_fixtures_and_scripts_do_not_trigger_unresolved_imports(self):
+        # B-03: unchanged, unrelated scripts and embedded fixtures (including MAESTRO's own
+        # examples/trusted-local/fixture) must not block scoped reviews of unrelated changes.
+        fixture_calc = (ROOT / "examples/trusted-local/fixture/calc.py").read_text()
+        fixture_test = (ROOT / "examples/trusted-local/fixture/tests/test_calc.py").read_text()
+        base = dict(
+            shop_files(),
+            **{
+                "scripts/helper.py": "VALUE = 1\n",
+                "scripts/run.py": "import helper\n",
+                "examples/trusted-local/fixture/calc.py": fixture_calc,
+                "examples/trusted-local/fixture/tests/test_calc.py": fixture_test,
+            },
+        )
+        selection = scoped(base, {"shop/checkout.py": DEFECT}, layout=trusted.verify_config(top_level_dir="."))
+        self.assertEqual((selection["status"], selection["unresolved_imports"]), ("selected", []))
+        self.assertNotIn("examples/trusted-local/fixture/calc.py", selection["critical"])
+        self.assertNotIn("scripts/helper.py", selection["critical"])
+        # MAESTRO's own repository layout with its tracked example fixture.
+        maestro_files = {
+            rel: (ROOT / rel).read_text()
+            for rel in (
+                "doctor.py",
+                "context.py",
+                "examples/trusted-local/fixture/calc.py",
+                "examples/trusted-local/fixture/tests/test_calc.py",
+            )
+        }
+        maestro_selection = scoped(
+            maestro_files,
+            {"doctor.py": maestro_files["doctor.py"] + "\n# comment\n"},
+            layout=trusted.verify_config(top_level_dir="."),
+        )
+        self.assertEqual((maestro_selection["status"], maestro_selection["unresolved_imports"]), ("selected", []))
+
+    def test_relative_imports_across_namespace_package_portions(self):
+        # B-04: PEP 420 namespace package portions across multiple configured roots merge for
+        # relative imports, while regular packages stay confined to their own root.
+        base = {
+            "mspace/a.py": "from .b import helper\nfrom . import c\n\ndef run(x):\n    return helper(x) + c.extra()\n",
+            "lib/mspace/b.py": "def helper(x):\n    return x + 1\n" + "# pad\n" * 4000,
+            "lib/mspace/c.py": "def extra():\n    return 2\n",
+            "mshop/__init__.py": "",
+            "mshop/y.py": "def missing():\n    return 9\n",
+            "lib/mshop/__init__.py": "",
+            "lib/mshop/x.py": "from .y import missing\n\ndef f():\n    return 1\n",
+            "tests/__init__.py": "",
+            "tests/test_mspace.py": "import unittest\nfrom mspace.a import run\n",
+        }
+        change = {"mspace/a.py": "from .b import helper\nfrom . import c\n\ndef run(x):\n    return helper(x) * c.extra()\n"}
+        layout = trusted.verify_config(top_level_dir=".", pythonpath=["lib"])
+        selection = scoped(base, change, 400000, layout)
+        self.assertEqual(selection["status"], "selected")
+        self.assertIn("lib/mspace/b.py", selection["critical"])
+        self.assertIn("lib/mspace/c.py", selection["critical"])
+        selection = scoped(base, change, 12000, layout)
+        self.assertEqual(selection["status"], "incomplete-critical-context")
+        self.assertEqual(selection["critical_omitted"], ["lib/mspace/b.py"])
+        # Regular packages with colliding names in different roots do not cross-contaminate.
+        regular_change = {"lib/mshop/x.py": "from .y import missing\n\ndef f():\n    return 2\n"}
+        regular_selection = scoped(base, regular_change, 400000, layout)
+        self.assertNotIn("mshop/y.py", regular_selection["critical"])
 
     def test_standard_library_and_third_party_imports_are_not_unresolved(self):
         base = {"app/__init__.py": "", "app/core.py": "def run():\n    return 1\n",
@@ -280,6 +416,17 @@ class ScopedLayoutTests(unittest.TestCase):
         # A changed submodule does not make tests of its sibling modules critical.
         selection = scoped(self.initializer_files(), {"pkg/sub.py": "def cap(x):\n    return x\n"}, 400000, layout)
         self.assertNotIn("tests/test_leaf.py", selection["critical"])
+        # A changed module whose stem collides with a directory name is not a package initializer.
+        collision = {
+            "mmod.py": "VALUE = 1\n",
+            "mmod/sub.py": "def helper():\n    return 1\n",
+            "caller.py": "import mmod.sub\n",
+            "tests/__init__.py": "",
+            "tests/test_sub.py": "import unittest\nimport caller\n",
+        }
+        selection = scoped(collision, {"mmod.py": "VALUE = 2\n"}, 400000, layout)
+        self.assertNotIn("tests/test_sub.py", selection["indirect_tests"])
+        self.assertNotIn("tests/test_sub.py", selection["critical"])
 
     @staticmethod
     def reexport_files():
@@ -479,7 +626,13 @@ class ScopedReviewEngineTests(unittest.TestCase):
                 self.assertFalse(self.store.has_artifact(task_id, "approval"))
 
     def test_the_task_layout_reaches_the_selector(self):
-        repo, base, change = self.shop(prefix="lib/")
+        extra = {
+            "examples/trusted-local/fixture/calc.py": (ROOT / "examples/trusted-local/fixture/calc.py").read_text(),
+            "examples/trusted-local/fixture/tests/test_calc.py": (
+                ROOT / "examples/trusted-local/fixture/tests/test_calc.py"
+            ).read_text(),
+        }
+        repo, base, change = self.shop(prefix="lib/", extra=extra)
         task_id = self.verified(repo, base, change, verify=trusted.verify_config(top_level_dir=".", pythonpath=["lib"]))
         self.assertEqual(self.engine.review(task_id, str(FAKE_CLAUDE))["review"]["outcome"], "completed")
         scope = self.record(task_id)["context"]
@@ -487,6 +640,7 @@ class ScopedReviewEngineTests(unittest.TestCase):
                          ("selected", "maestro-scoped-context-v3", []))
         for path in ("lib/shop/money.py", "lib/shop/gateway.py", "tests/test_checkout.py"):
             self.assertIn(path, scope["included"])
+        self.assertNotIn("examples/trusted-local/fixture/calc.py", scope["included"])
         self.engine.approve(task_id, self.store.get(task_id)["evidence"]["snapshot_sha256"], "human")
 
     def test_an_import_root_hidden_from_the_layout_is_never_sent(self):

@@ -207,7 +207,8 @@ class Resolver:
             return self.resolve(name)
         if scope == LEGACY:
             return self.legacy.get(name)
-        return self.find(name, [scope])
+        roots = self.roots if self.find(name.partition(".")[0], self.roots) == set() else [scope]
+        return self.find(name, roots)
 
     def absolute(self, path, level, name):
         """(scope, absolute name) pairs for one import statement in `path`."""
@@ -334,17 +335,20 @@ def unresolved(parsed, resolver, changed):
     """Absolute imports that resolve nowhere, although a file in a plain directory carries the name.
 
     Such a directory is a sys.path entry the task's layout does not declare: a changed file
-    inside it, or a changed file it holds, may be what really runs. Standard-library names
-    and imports with no such file (third-party packages) are never reported.
+    inside it, or a file a changed module imports from it, may be what really runs. Standard-library
+    names, unrelated fixtures and third-party packages are never reported.
     """
     found = set()
     for path, info in parsed.items():
         for level, name, names in info["imports"]:
-            if level or name.split(".")[0] in STDLIB or resolver.resolve(name) is not None:
+            if level or name.split(".")[0] in STDLIB or resolver.resolve(name):
                 continue
             for candidate in [name] + [name + "." + child for child in names if child != "*"]:
+                if resolver.resolve(candidate):
+                    continue
                 for directory, target in sorted(resolver.shadow.get(candidate, ())):
-                    if path.startswith(directory + "/") or target in changed:
+                    used = path.startswith(directory + "/") or names or info["references"] & parsed[target]["definitions"]
+                    if target in changed or (path in changed and used):
                         found.add("%s imports %s (%s)" % (path, candidate, target))
     return found
 
