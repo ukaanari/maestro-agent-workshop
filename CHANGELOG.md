@@ -38,10 +38,18 @@ describes work after the latest tag.
       reviewer is not launched, the attempt is `unavailable`, and the message names the
       imports.
     * Tests are also recognised by the task's test directory and file pattern.
-  * Token efficiency: on the preserved tomli snapshot (1,011 files, `src/` layout) the
-    selection is unchanged, 14 files with the same input bytes at 32,000 tokens and the
-    same `incomplete-critical-context` result at 12,000. Every flat and `src/` fixture
-    produces a byte-identical selection, with and without a layout.
+  * Token efficiency, measured offline on the exact reviewer input of both preserved tomli
+    scoped tasks (1,011 files, `src/` layout) under `main` and under this change:
+    * **Identical:** the selected file set (14 files at 32,000 tokens; 7 files and the
+      same two omitted tests in the `incomplete-critical-context` refusal at 12,000), the
+      selected files' bytes, and the audit digest.
+    * **Changed:** the full reviewer input, 41 bytes larger (the longer limitation
+      sentence; the policy string keeps its length), so its SHA-256 and its context
+      digest differ.
+    * Flat and `src/` test fixtures, with and without a layout, give the same selected
+      files, file bytes, definition map, critical omissions and audit digest. That
+      comparison used the test renderer, which leaves out the policy and limitation
+      text, so it says nothing about full reviewer-input bytes.
   * Compatibility: the policy version and the limitation text are part of the scoped
     input, so context digests change. A scoped review recorded under an earlier policy
     never approves; the message says to reject the task and start it again (a completed
@@ -57,8 +65,9 @@ describes work after the latest tag.
     re-export cases, custom test directories and patterns, the layout reaching the
     selector end to end, and an earlier-policy review refused at approval. Of 31 mutants,
     30 fail them. The survivor drops the "changed `__init__.py` only" filter on package
-    expansion; it is equivalent in practice, because a module cannot also be imported as
-    a package.
+    expansion. It appears equivalent but is not proven so: it can only add must-include
+    tests, never drop one, and only when a changed module shares its dotted name with a
+    directory, a layout no test covers.
 * Security fix, independent audit finding AUD-01: verification could pass with no test run.
   * Behaviour before: without layout options, verification ran
     `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test

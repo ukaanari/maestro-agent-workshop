@@ -409,9 +409,11 @@ and the export, and it is **not a full-repository review**.
   given) and each `--pythonpath` entry, in the order Python searches them. A regular
   package or module in an earlier entry shadows a later one, and namespace packages
   merge. Only names that resolve to no file there fall back to the earlier rule (the
-  repository root and `src/`), so flat and `src/` layouts keep their selection; on the
-  tomli snapshot the selection and input bytes are unchanged. Tests are also recognised
-  by the task's own `--test-dir` and `--test-pattern`. In addition:
+  repository root and `src/`), so flat and `src/` layouts keep their selection. On the
+  preserved tomli snapshots the selected files and their bytes are unchanged; the full
+  reviewer input is not, because it carries the policy version and the limitation text,
+  so its bytes and context digest change. Tests are also recognised by the task's own
+  `--test-dir` and `--test-pattern`. In addition:
   * a test that enters a package whose `__init__.py` changed, within the same three
     hops, is must-include, because importing any submodule runs that initializer;
   * for `from package import name` in a changed file, the file the package's
