@@ -6,6 +6,71 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Security fix, independent audit finding AUD-02: a scoped review could be reported as
+  complete (`selected`) while critical context was missing. Full review, the default, was
+  not affected.
+  * Behaviour before: the selector resolved imports only relative to the repository root
+    and `src/`, and never saw the task's verification layout. With code under `lib/` or
+    `backend/` (`--pythonpath`), a helper the change depended on was dropped under a tight
+    budget and the status still said `selected`. A test that reached a changed
+    `pkg/__init__.py` only through submodules (`caller` → `pkg.sub` → `pkg.leaf`) was not
+    must-include, although importing any submodule runs the initializer. For
+    `from pkg import rate`, where `pkg/__init__.py` takes `rate` from `pkg/impl.py`, the
+    defining file was not must-include. Tests named by `--test-dir` / `--test-pattern`
+    outside the usual names were not recognised.
+  * Fix (scoped-context policy v3):
+    * Imports resolve against the task's verification layout first, in the order Python
+      searches it: the top-level directory (the test directory when none is given), then
+      each `--pythonpath` entry. A regular package or module in an earlier entry shadows
+      a later one, and PEP 420 namespace package portions merge across roots for both
+      absolute and relative imports while keeping regular packages confined to their own
+      root. A resolver test checks eight collision layouts against what Python itself
+      imports. Names that resolve to no file there fall back to the root and `src/`
+      rule, so ordinary layouts keep their graph.
+    * A test entering a package whose `__init__.py` changed is must-include, within the
+      unchanged three-hop bound.
+    * For names a changed file imports from a package, the file the initializer takes
+      each name from is must-include (also under `try`/`if` and through `import *`, at
+      most two initializers deep). Names that are not imported are not followed.
+    * New refusal `unresolved-imports`: an absolute import candidate that resolves to no
+      file (distinguishing an empty namespace directory from an actual resolved module or
+      submodule), while a file with that module path sits in a plain directory outside
+      every package and outside the layout, stops the review when the found file is
+      changed, or when a changed file is inside that directory or imports/references a
+      symbol from that file. Unchanged, unrelated scripts and embedded fixtures (such as
+      `examples/trusted-local/fixture`), standard-library names and third-party packages
+      are never reported. The reviewer is not launched, the attempt is `unavailable`, and
+      the message names the imports.
+    * Tests are also recognised by the task's test directory and file pattern.
+  * Token efficiency, measured offline on the exact reviewer input of both preserved tomli
+    scoped tasks (1,011 files, `src/` layout) under `main` and under this change:
+    * **Identical:** the selected file set (14 files at 32,000 tokens; 7 files and the
+      same two omitted tests in the `incomplete-critical-context` refusal at 12,000), the
+      selected files' bytes, and the audit digest.
+    * **Changed:** the full reviewer input, 41 bytes larger (the longer limitation
+      sentence; the policy string keeps its length), so its SHA-256 and its context
+      digest differ.
+    * Flat and `src/` test fixtures, with and without a layout, give the same selected
+      files, file bytes, definition map, critical omissions and audit digest. That
+      comparison used the test renderer, which leaves out the policy and limitation
+      text, so it says nothing about full reviewer-input bytes.
+  * Compatibility: the policy version and the limitation text are part of the scoped
+    input, so context digests change. A scoped review recorded under an earlier policy
+    never approves; the message says to reject the task and start it again (a completed
+    review stays final). Full-review tasks and task identities are unchanged.
+  * Residual: chains longer than three hops, re-exports deeper than two initializers or
+    through ordinary modules, dynamic imports, and a local file that shadows a
+    standard-library module from an undeclared directory are not detected.
+  * 15 tests: the audit's lib/backend layouts, an undeclared root (in the selector, from a
+    changed importer outside the undeclared root, across a namespace directory, and end to
+    end with a test package that edits `sys.path`), unrelated scripts and MAESTRO's own
+    tracked fixture not blocking a scoped review, standard-library and third-party imports
+    beside local look-alikes, root precedence and name collisions checked against Python,
+    relative imports across PEP 420 namespace package portions, a default-layout test
+    helper shadowing a root module, a changed initializer reached through submodules (with
+    the hop bound and module/directory collision invariants kept), the re-export cases,
+    custom test directories and patterns, the layout reaching the selector end to end, and
+    an earlier-policy review refused at approval. All 42 mutants fail them.
 * Security fix, independent audit finding AUD-01: verification could pass with no test run.
   * Behaviour before: without layout options, verification ran
     `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test
