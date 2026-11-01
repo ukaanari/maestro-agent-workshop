@@ -6,6 +6,59 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Security fix, independent audit finding AUD-02: a scoped review could be reported as
+  complete (`selected`) while critical context was missing. Full review, the default, was
+  not affected.
+  * Behaviour before: the selector resolved imports only relative to the repository root
+    and `src/`, and never saw the task's verification layout. With code under `lib/` or
+    `backend/` (`--pythonpath`), a helper the change depended on was dropped under a tight
+    budget and the status still said `selected`. A test that reached a changed
+    `pkg/__init__.py` only through submodules (`caller` → `pkg.sub` → `pkg.leaf`) was not
+    must-include, although importing any submodule runs the initializer. For
+    `from pkg import rate`, where `pkg/__init__.py` takes `rate` from `pkg/impl.py`, the
+    defining file was not must-include. Tests named by `--test-dir` / `--test-pattern`
+    outside the usual names were not recognised.
+  * Fix (scoped-context policy v3):
+    * Imports resolve against the task's verification layout first, in the order Python
+      searches it: the top-level directory (the test directory when none is given), then
+      each `--pythonpath` entry. A regular package or module in an earlier entry shadows
+      a later one, and namespace packages merge. A resolver test checks seven collision
+      layouts against what Python itself imports. Names that resolve to no file there
+      fall back to the root and `src/` rule, so ordinary layouts keep their graph.
+    * A test entering a package whose `__init__.py` changed is must-include, within the
+      unchanged three-hop bound.
+    * For names a changed file imports from a package, the file the initializer takes
+      each name from is must-include (also under `try`/`if` and through `import *`, at
+      most two initializers deep). Names that are not imported are not followed.
+    * New refusal `unresolved-imports`: an absolute import that resolves to no file,
+      while a file with that module path sits in a plain directory outside every
+      package and outside the layout, stops the review when the importing file or the
+      file found there is changed or inside that directory. Standard-library names and
+      imports with no such file, such as third-party packages, are never reported. The
+      reviewer is not launched, the attempt is `unavailable`, and the message names the
+      imports.
+    * Tests are also recognised by the task's test directory and file pattern.
+  * Token efficiency: on the preserved tomli snapshot (1,011 files, `src/` layout) the
+    selection is unchanged, 14 files with the same input bytes at 32,000 tokens and the
+    same `incomplete-critical-context` result at 12,000. Every flat and `src/` fixture
+    produces a byte-identical selection, with and without a layout.
+  * Compatibility: the policy version and the limitation text are part of the scoped
+    input, so context digests change. A scoped review recorded under an earlier policy
+    never approves; the message says to reject the task and start it again (a completed
+    review stays final). Full-review tasks and task identities are unchanged.
+  * Residual: chains longer than three hops, re-exports deeper than two initializers or
+    through ordinary modules, dynamic imports, and a local file that shadows a
+    standard-library module from an undeclared directory are not detected.
+  * 11 tests: the audit's lib/backend layouts, an undeclared root (in the selector and
+    end to end, with a test package that edits `sys.path`), standard-library and
+    third-party imports beside local look-alikes, root precedence and name collisions
+    checked against Python, a default-layout test helper shadowing a root module, a
+    changed initializer reached through submodules (and the hop bound kept), the
+    re-export cases, custom test directories and patterns, the layout reaching the
+    selector end to end, and an earlier-policy review refused at approval. Of 31 mutants,
+    30 fail them. The survivor drops the "changed `__init__.py` only" filter on package
+    expansion; it is equivalent in practice, because a module cannot also be imported as
+    a package.
 * Security fix, independent audit finding AUD-01: verification could pass with no test run.
   * Behaviour before: without layout options, verification ran
     `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test

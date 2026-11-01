@@ -15,30 +15,70 @@ semantic coverage is proved. Weights are engineering choices, not tuned probabil
 import ast
 from collections import defaultdict, deque
 import difflib
+import fnmatch
 import hashlib
 import json
+import os
 from pathlib import PurePosixPath
+import pkgutil
 import re
+import sys
+import sysconfig
 
-POLICY = "maestro-scoped-context-v2"   # v2: tests reaching a changed module through packages are critical
+# v2: tests reaching a changed module through packages are critical.
+# v3: imports resolve against the task's verification layout; a changed package initializer,
+# a re-exported name or an unresolved local import can no longer end in a silent "selected".
+POLICY = "maestro-scoped-context-v3"
 TEST_HOPS = 3                          # test -> package __init__ -> package __init__ -> module
+REEXPORT_DEPTH = 2                     # package initializers followed for a name a changed file imports
 MAP_BYTES, MAP_SYMBOLS = 2048, 12
+LEGACY = "legacy"                      # names relative to the repository root or src/, as before v3
 LIMITATIONS = (
     "Scoped review: only the listed files were supplied in full; this is not a full-repository review.",
-    "Relevance is approximate: Python imports, test naming and bounded lexical references only.",
+    "Relevance is approximate: Python imports resolved against the verification layout, test naming "
+    "and bounded lexical references only.",
     "Dynamic imports, fixtures loaded by path, configuration and non-Python consumers are not resolved.",
     "An omitted file is not evidence that it is irrelevant or correct.",
 )
 
 
-def is_test(path):
+def stdlib_names():
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is None:  # Python 3.9: the running interpreter's own standard library
+        stdlib = sysconfig.get_paths()["stdlib"]
+        names = set(sys.builtin_module_names) | {
+            m.name for m in pkgutil.iter_modules([stdlib, os.path.join(stdlib, "lib-dynload")])}
+    return frozenset(names)
+
+
+STDLIB = stdlib_names()
+
+
+def is_test(path, layout=None):
     p = PurePosixPath(path)
-    return p.name.startswith("test_") or p.stem.endswith("_test") or "tests" in p.parts
+    if p.name.startswith("test_") or p.stem.endswith("_test") or "tests" in p.parts:
+        return True
+    # What the task's own discovery collects: its test directory and file pattern.
+    test_dir, pattern = (layout["test_dir"], layout["pattern"]) if layout else ("tests", "test*.py")
+    return path.startswith(test_dir + "/") and fnmatch.fnmatchcase(p.name, pattern)
+
+
+def module_roots(layout=None):
+    """The verification run's sys.path entries inside the snapshot, in its order.
+
+    The runner prepends the --pythonpath entries; unittest discovery then inserts its
+    top-level directory (the test directory when none is given) first unless already there.
+    """
+    if layout is None:
+        return ["tests"]
+    top = layout["test_dir"] if layout["top_level_dir"] is None else layout["top_level_dir"]
+    roots = list(layout["pythonpath"]) if top in layout["pythonpath"] else [top] + list(layout["pythonpath"])
+    return ["" if r == "." else r for r in roots]
 
 
 def parse_python(path, body):
     result = {"definitions": set(), "references": set(), "imports": [], "outline": [],
-              "status": "non-python"}
+              "bindings": defaultdict(list), "status": "non-python"}
     if not path.endswith(".py"):
         return result
     try:
@@ -65,6 +105,24 @@ def parse_python(path, body):
             for target in targets:
                 if isinstance(target, ast.Name):
                     result["definitions"].add(target.id)
+
+    def bind(statements):
+        # Module-level names bound by imports, also under if/try: what `from pkg import name` gets.
+        for node in statements:
+            if isinstance(node, ast.ImportFrom):
+                for n in node.names:
+                    result["bindings"][n.asname or n.name].append((node.level, node.module or "", n.name))
+            elif isinstance(node, ast.Import):
+                for n in node.names:
+                    if n.asname:
+                        result["bindings"][n.asname].append((0, n.name, None))
+            elif isinstance(node, ast.If):
+                bind(node.body)
+                bind(node.orelse)
+            elif isinstance(node, ast.Try):
+                for block in [node.body, node.orelse, node.finalbody] + [h.body for h in node.handlers]:
+                    bind(block)
+    bind(tree.body)
     result["outline"].sort()
     return result
 
@@ -78,12 +136,118 @@ def module_name(path):
     return ".".join(parts)
 
 
-def graph_for(files):
+def join(directory, name):
+    return directory + "/" + name if directory else name
+
+
+class Resolver:
+    """Which snapshot files an import can load.
+
+    Absolute names resolve first as the verification run does: its roots in sys.path
+    order, a regular package or module in an earlier root shadowing later ones, and
+    namespace portions merged. Only when that finds no file do the pre-v3 names relative
+    to the repository root and src/ apply, so ordinary layouts keep their graph.
+    """
+
+    def __init__(self, paths, roots):
+        self.files = {p for p in paths if p.endswith(".py")}
+        self.dirs = {str(d) for p in self.files for d in PurePosixPath(p).parents if str(d) != "."}
+        self.roots = roots
+        self.legacy = defaultdict(set)
+        for p in sorted(self.files):
+            self.legacy[module_name(p)].add(p)
+        self.packages = {p[:-len("/__init__.py")] for p in self.files if p.endswith("/__init__.py")}
+        # Unconfigured roots: plain directories, outside every package, that are not already roots.
+        known = set(roots) | {"", "src"}
+        plain = {d for d in self.dirs if d not in known and
+                 not any(str(a) in self.packages for a in [PurePosixPath(d)] + list(PurePosixPath(d).parents))}
+        self.shadow = defaultdict(set)
+        for p in self.files:
+            parts = p[:-3].split("/")
+            if parts[-1] == "__init__":
+                parts.pop()
+            for k in range(1, len(parts)):
+                if "/".join(parts[:k]) in plain:
+                    self.shadow[".".join(parts[k:])].add(("/".join(parts[:k]), p))
+
+    def find(self, name, locations):
+        """The file one absolute name loads from these sys.path entries; set() for a namespace package."""
+        if not name:
+            return None
+        parts = name.split(".")
+        for i, part in enumerate(parts):
+            regular, portions = None, []
+            for location in locations:
+                base = join(location, part)
+                if base + "/__init__.py" in self.files or base + ".py" in self.files:
+                    regular = base
+                    break
+                if base in self.dirs:
+                    portions.append(base)
+            if regular is None:
+                if not portions:
+                    return None
+                if i == len(parts) - 1:
+                    return set()
+                locations = portions
+            elif i == len(parts) - 1:
+                return {regular + "/__init__.py" if regular + "/__init__.py" in self.files else regular + ".py"}
+            elif regular + "/__init__.py" in self.files:
+                locations = [regular]
+            else:
+                return None  # a module has no submodules
+        return None
+
+    def resolve(self, name):
+        found = self.find(name, self.roots)
+        return found if found else self.legacy.get(name, found)
+
+    def lookup(self, scope, name):
+        if scope is None:
+            return self.resolve(name)
+        if scope == LEGACY:
+            return self.legacy.get(name)
+        return self.find(name, [scope])
+
+    def absolute(self, path, level, name):
+        """(scope, absolute name) pairs for one import statement in `path`."""
+        if not level:
+            return [(None, name)]
+        found = []
+        for root in self.roots:
+            if root and not path.startswith(root + "/"):
+                continue
+            parts = (path[len(root) + 1:] if root else path)[:-3].split("/")
+            package = parts[:-1]
+            if level <= len(package):  # Python refuses a relative import beyond the top-level package
+                absolute = ".".join(package[:len(package) - level + 1] + ([name] if name else []))
+                found.append((root, absolute))
+        # Unchanged pre-v3 names relative to the repository root and src/.
+        mod = module_name(path)
+        package = mod if path.endswith("/__init__.py") else mod.rpartition(".")[0]
+        parts = package.split(".") if package else []
+        prefix = parts[:len(parts) - level + 1] if level <= len(parts) else []
+        found.append((LEGACY, ".".join(prefix + ([name] if name else []))))
+        return found
+
+    def names(self, path):
+        """(scope, dotted name) pairs under which `path` can be imported."""
+        found = []
+        for root in self.roots:
+            if not root or path.startswith(root + "/"):
+                parts = (path[len(root) + 1:] if root else path)[:-3].split("/")
+                if parts[-1] == "__init__":
+                    parts.pop()
+                if parts:
+                    found.append((root, ".".join(parts)))
+        return found + [(LEGACY, module_name(path))]
+
+
+def graph_for(files, roots):
     parsed = {p: parse_python(p, f["body"]) for p, f in sorted(files.items())}
-    modules, definitions = defaultdict(set), defaultdict(set)
+    resolver = Resolver(parsed, roots)
+    definitions = defaultdict(set)
     for p, info in parsed.items():
-        if p.endswith(".py"):
-            modules[module_name(p)].add(p)
         for name in info["definitions"]:
             definitions[name].add(p)
     edges, imports, explicit = defaultdict(dict), defaultdict(set), defaultdict(set)
@@ -93,21 +257,18 @@ def graph_for(files):
             edges[a][b] = max(edges[a].get(b, 0), weight)
 
     for path, info in parsed.items():
-        mod = module_name(path)
-        package = mod if path.endswith("/__init__.py") else mod.rpartition(".")[0]
         for level, name, names in info["imports"]:
-            if level:
-                parts = package.split(".") if package else []
-                prefix = parts[:len(parts) - level + 1] if level <= len(parts) else []
-                name = ".".join(prefix + ([name] if name else []))
-            targets = set(modules.get(name, ()))
-            for child in names:
-                targets.update(modules.get(name + "." + child, ()))
+            targets, scoped = set(), resolver.absolute(path, level, name)
+            for scope, absolute in scoped:
+                targets.update(resolver.lookup(scope, absolute) or ())
+                for child in names:
+                    targets.update(resolver.lookup(scope, absolute + "." + child) or ())
             explicit[path].update(targets)  # what the statement names, not its parent packages
             # Package initializers for dotted imports and re-export chains.
-            for count in range(1, len(name.split("."))):
-                targets.update(p for p in modules.get(".".join(name.split(".")[:count]), ())
-                               if p.endswith("/__init__.py"))
+            for scope, absolute in scoped:
+                for count in range(1, len(absolute.split("."))):
+                    targets.update(p for p in resolver.lookup(scope, ".".join(absolute.split(".")[:count])) or ()
+                                   if p.endswith("/__init__.py"))
             for target in targets:
                 imports[path].add(target)
                 link(path, target, 10)
@@ -118,7 +279,7 @@ def graph_for(files):
                 for target in targets:
                     link(path, target, 2)
                     link(target, path, 1)
-    return parsed, edges, imports, explicit
+    return parsed, resolver, edges, imports, explicit
 
 
 def reaches(start, targets, explicit, hops=TEST_HOPS):
@@ -136,13 +297,67 @@ def reaches(start, targets, explicit, hops=TEST_HOPS):
     return False
 
 
-def rank(before, after):
-    """Changed paths, parse info, ranked candidates, reasons, direct and indirect tests, critical set, scores."""
+def under_changed_packages(parsed, resolver, changed):
+    """Modules whose import runs a changed package initializer: those inside that package."""
+    packages = {scoped for p in changed if p.endswith("/__init__.py") and p in parsed
+                for scoped in resolver.names(p) if scoped[1]}
+    return {p for p in parsed if p.endswith(".py") and
+            any(name.startswith(n + ".") for scope, name in resolver.names(p) for s, n in packages if s == scope)}
+
+
+def reexports(parsed, resolver, changed):
+    """Files that define a name a changed file imports from a package, through its initializers."""
+    def follow(init, name, depth):
+        found, bound = set(), parsed.get(init, {}).get("bindings", {})
+        for level, module, original in bound.get(name) or bound.get("*", ()):
+            for scope, absolute in resolver.absolute(init, level, module):
+                submodule = resolver.lookup(scope, absolute + "." + original) if original not in (None, "*") else None
+                for target in submodule or resolver.lookup(scope, absolute) or ():
+                    found.add(target)
+                    if target.endswith("/__init__.py") and depth > 1 and original and not submodule:
+                        found |= follow(target, name if original == "*" else original, depth - 1)
+        return found
+
+    found = set()
+    for path in sorted(changed & set(parsed)):
+        for level, module, names in parsed[path]["imports"]:
+            for scope, absolute in resolver.absolute(path, level, module):
+                for init in resolver.lookup(scope, absolute) or ():
+                    if init.endswith("/__init__.py"):
+                        for name in names:
+                            if name != "*" and not resolver.lookup(scope, absolute + "." + name):
+                                found |= follow(init, name, REEXPORT_DEPTH)
+    return found - changed
+
+
+def unresolved(parsed, resolver, changed):
+    """Absolute imports that resolve nowhere, although a file in a plain directory carries the name.
+
+    Such a directory is a sys.path entry the task's layout does not declare: a changed file
+    inside it, or a changed file it holds, may be what really runs. Standard-library names
+    and imports with no such file (third-party packages) are never reported.
+    """
+    found = set()
+    for path, info in parsed.items():
+        for level, name, names in info["imports"]:
+            if level or name.split(".")[0] in STDLIB or resolver.resolve(name) is not None:
+                continue
+            for candidate in [name] + [name + "." + child for child in names if child != "*"]:
+                for directory, target in sorted(resolver.shadow.get(candidate, ())):
+                    if path.startswith(directory + "/") or target in changed:
+                        found.add("%s imports %s (%s)" % (path, candidate, target))
+    return found
+
+
+def rank(before, after, layout=None):
+    """Changed paths, parse info, ranked candidates, reasons, direct and indirect tests, critical set, scores,
+    unresolved local imports."""
     changed = {p for p in set(before) | set(after)
                if (before.get(p, {}).get("oid"), before.get(p, {}).get("mode")) !=
                   (after.get(p, {}).get("oid"), after.get(p, {}).get("mode"))}
-    _, old_edges, old_imports, old_explicit = graph_for(before)
-    info, edges, imports, explicit = graph_for(after)
+    roots = module_roots(layout)
+    old_info, old_resolver, old_edges, old_imports, old_explicit = graph_for(before, roots)
+    info, resolver, edges, imports, explicit = graph_for(after, roots)
     # Union both trees: a removed import or deleted helper still seeds context.
     for a, neighbors in old_edges.items():
         for b, weight in neighbors.items():
@@ -153,16 +368,22 @@ def rank(before, after):
         explicit[a].update(neighbors)
     reasons, direct_tests = defaultdict(set), set()
     for p in after:
-        if is_test(p):
+        if is_test(p, layout):
             stem = PurePosixPath(p).stem
             stem = stem[5:] if stem.startswith("test_") else stem[:-5] if stem.endswith("_test") else stem
             if imports[p] & changed or any(PurePosixPath(c).stem == stem for c in changed):
                 direct_tests.add(p)
                 reasons[p].add("direct-test")
-    # Tests that exercise a changed module through its package (tomli: `from . import tomllib`).
-    indirect_tests = {p for p in after if is_test(p) and p not in direct_tests and reaches(p, changed, explicit)}
+    # Tests that exercise a changed module through its package (tomli: `from . import tomllib`),
+    # or enter a package whose changed initializer then runs.
+    targets = changed | under_changed_packages(info, resolver, changed)
+    indirect_tests = {p for p in after if is_test(p, layout) and p not in direct_tests
+                      and reaches(p, targets, explicit)}
     for p in indirect_tests:
         reasons[p].add("indirect-test")
+    reexported = reexports(old_info, old_resolver, changed) | reexports(info, resolver, changed)
+    for p in reexported:
+        reasons[p].add("re-export")
     seeds = {p: 1000000 for p in changed}
     # Added AND removed lines supply identifier hints.
     identifiers = set()
@@ -197,7 +418,7 @@ def rank(before, after):
             if weight >= 6 and b not in distance:
                 distance[b] = distance[a] + 1
                 queue.append(b)
-    dependencies = set().union(*(imports[p] for p in changed)) if changed else set()
+    dependencies = (set().union(*(imports[p] for p in changed)) if changed else set()) | reexported
     callers = {p for p, targets in imports.items() if targets & changed}
     for p in after:
         if p in dependencies:
@@ -210,22 +431,26 @@ def rank(before, after):
             reasons[p].add("graph-reachable")
     for p in changed:
         reasons[p].add("changed-full")
+    critical = (dependencies | callers | direct_tests | indirect_tests) & set(after)
     priority = lambda p: (0 if p in dependencies | callers else 1 if p in direct_tests | indirect_tests else
                           2 if distance.get(p, 99) <= 2 else 3, -scores.get(p, 0), p)
-    candidates = sorted((p for p in after if p not in changed and scores.get(p, 0)), key=priority)
-    critical = (dependencies | callers | direct_tests | indirect_tests) & set(after)
-    return changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores
+    # A critical file is always a candidate, even one the score diffusion did not reach.
+    candidates = sorted((p for p in after if p not in changed and (scores.get(p, 0) or p in critical)), key=priority)
+    missing = unresolved(old_info, old_resolver, changed) | unresolved(info, resolver, changed)
+    return changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores, missing
 
 
-def select(before, after, render, budget_bytes):
+def select(before, after, render, budget_bytes, layout=None):
     """Greedy whole-file admission against the exact rendered reviewer input.
 
-    `before`/`after` map path -> {"body", "mode", "oid"}. `render(selection)` returns the
-    exact bytes that would be sent. Changed after-images, deleted base files, the exact
-    patch and binding metadata are mandatory and never cut; the map shrinks first.
+    `before`/`after` map path -> {"body", "mode", "oid"}; `layout` is the task's verification
+    layout (None for the default discovery). `render(selection)` returns the exact bytes
+    that would be sent. Changed after-images, deleted base files, the exact patch and
+    binding metadata are mandatory and never cut; the map shrinks first.
     Returns (payload, canonical audit bytes, selection summary).
     """
-    changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores = rank(before, after)
+    changed, info, candidates, reasons, direct_tests, indirect_tests, critical, scores, missing = rank(
+        before, after, layout)
     universe = sorted(set(before) | set(after))
     selected = set(changed)
     outline, size = [], 0
@@ -279,10 +504,11 @@ def select(before, after, render, budget_bytes):
     final = state(hashlib.sha256(audit).hexdigest())
     payload = render(final)
     status = ("budget-exceeded" if len(payload) > budget_bytes else
+              "unresolved-imports" if missing else
               "incomplete-critical-context" if final["critical_omitted"] else "selected")
     return payload, audit, dict(final, status=status, mandatory_bytes=mandatory,
                                 direct_tests=sorted(direct_tests), indirect_tests=sorted(indirect_tests),
-                                critical=sorted(critical),
+                                critical=sorted(critical), unresolved_imports=sorted(missing),
                                 parse_failures=sorted(p for p in info if info[p]["status"] == "parse-failed"))
 
 
