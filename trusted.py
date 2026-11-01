@@ -59,7 +59,7 @@ VERIFY_RUNNER = (
 
 
 def verify_config(test_dir=None, top_level_dir=None, pattern=None, pythonpath=None):
-    """Explicit unittest layout options; None when none is given (the original fixed command).
+    """Explicit unittest layout options; None when none is given (the original discovery).
 
     Only relative, plain directory names inside the snapshot and a *.py glob are accepted.
     There is no command, shell or interpreter option to configure.
@@ -86,7 +86,9 @@ def verify_config(test_dir=None, top_level_dir=None, pattern=None, pythonpath=No
 
 def verification_command(config=None):
     if config is None:
-        return [python_runtime()[0], "-I", "-B", "-m", "unittest", "discover", "-s", "tests"]
+        # The discovery of `-m unittest discover -s tests`, through the runner, so a run with
+        # no test fails and its counts are recorded like any configured layout's.
+        return [python_runtime()[0], "-I", "-B", "-c", VERIFY_RUNNER, "--", "-s", "tests"]
     try:
         valid = (isinstance(config, dict) and set(config) == {"test_dir", "top_level_dir", "pattern", "pythonpath"} and
                  verify_config(**config) == config)
@@ -379,7 +381,7 @@ def confined_verify(home, copy, command, cancelled=lambda: False):
 
 
 def runner_summary(output):
-    """The fixed runner's count line. Informational only: the exit status decides."""
+    """The fixed runner's count line, or None if the run printed none."""
     lines = output.decode("utf-8", "replace").strip().splitlines()
     try:
         value = json.loads(lines[-1]) if lines else None
@@ -389,6 +391,19 @@ def runner_summary(output):
     if not isinstance(value, dict) or set(value) != keys or any(type(value[k]) is not int for k in keys):
         return None
     return value
+
+
+def counted(summary):
+    """A zero exit passes only with the runner's own counts: at least one test, none failing.
+
+    This catches emptied tests or a process that exits before reporting. It cannot stop a
+    hostile implementer: the code under test runs in that process and can print the line.
+    """
+    if summary is None:
+        raise PolicyError("verification exited 0 without the runner's test counts (did the test process exit early?)")
+    if summary["tests_run"] < 1 or summary["failures"] or summary["errors"]:
+        raise PolicyError("verification counts do not show a passing run: " + json.dumps(summary, sort_keys=True))
+    return summary
 
 
 def check(repo, base, verify=None):
@@ -426,8 +441,12 @@ def check(repo, base, verify=None):
             if match is None:
                 raise  # a sandbox or setup failure, not a test result
             report["baseline"] = {"passed": False, "exit_code": int(match.group(1)), "excerpt": str(exc)[:2000]}
-        if output is not None and verify is not None:
+        if output is not None:
             report["baseline"]["summary"] = runner_summary(output)
+            try:
+                counted(report["baseline"]["summary"])
+            except PolicyError as exc:
+                report["baseline"].update(passed=False, reason=str(exc))
         if source_guard(repo, home) != before:
             raise IntegrityError("source repository guard changed during check")
     report["compatible"] = True
@@ -710,11 +729,9 @@ class TrustedEngine:
                     try:
                         output = confined_verify(home, copy, command, lambda: self.store.cancelled(task_id))
                         atomic_write(home / "verification.stdout.log", output)
-                        record.update(exit_code=0, passed=True,
+                        record.update(exit_code=0, summary=runner_summary(output),
                                       stdout={"path": "verification.stdout.log", "bytes": len(output),
                                               "sha256": hashlib.sha256(output).hexdigest()})
-                        if config is not None:
-                            record["summary"] = runner_summary(output)
                     except PolicyError as exc:
                         # Seatbelt.run exposes a bounded stderr excerpt on nonzero exit.
                         match = re.search(r"child exited with code (-?\d+):", str(exc))
@@ -726,6 +743,7 @@ class TrustedEngine:
                         raise
                     finally:
                         self.unchanged(task_id)
+                    counted(record["summary"])
                 record["passed"] = True
                 evidence = dict(task["evidence"], verification_sha256=self.store.artifact(task_id, "verification", record))
                 self.store.transition(task_id, "awaiting_approval", "Verification passed; exact hash approval required", evidence)
@@ -747,6 +765,10 @@ class TrustedEngine:
                 task["spec"].get("verify_command") != command or
                 digest(verification) != task["evidence"].get("verification_sha256")):
             raise PolicyError("verification evidence is stale or unsuccessful")
+        try:
+            counted(verification.get("summary"))
+        except PolicyError as exc:
+            raise PolicyError("verification evidence is stale or unsuccessful: " + str(exc)) from exc
         return snap
 
     def approval_context(self, task_id):
@@ -1101,6 +1123,9 @@ class TrustedEngine:
         task["notice"] = NOTICE
         if self.store.has_artifact(task_id, "changes"):
             task["changes"] = self.store.artifact(task_id, "changes")["files"]
+        if self.store.has_artifact(task_id, "verification"):
+            verification = self.store.artifact(task_id, "verification")
+            task["verification"] = {key: verification.get(key) for key in ("passed", "exit_code", "summary")}
         if task["spec"].get("review") is not None:
             task["review"] = self.review_summary(task)
         task["next"] = self.next_steps(task)

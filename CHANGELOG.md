@@ -6,6 +6,33 @@ describes work after the latest tag.
 
 ## Unreleased
 
+* Security fix, independent audit finding AUD-01: verification could pass with no test run.
+  * Behaviour before: without layout options, verification ran
+    `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test
+    runs, so an implementation that emptied the tests reached approval with
+    `verification.passed: true`; `trusted check` reported such a baseline as passing. With
+    layout options the runner refused zero tests, but only the exit status decided, so a
+    test process that called `os._exit(0)` while being imported also passed. The reviewer
+    was never told how many tests ran.
+  * Fix: every run, with or without options, goes through the constant runner (without
+    options it discovers exactly as before, `-s tests`). A zero exit passes only with the
+    runner's count line showing at least one test and no failure or error; verification,
+    `trusted check` and approval all require it. Counts are shown by `trusted status` and
+    sent to the reviewer, in both full and scoped review.
+  * Compatibility: this supersedes the v0.4.0 note that without options "the original fixed
+    command and task identity are unchanged". The default command is part of a task's
+    identity, so a task started without options gets a new identity, and one started before
+    this change is refused at verification or approval (fail closed) and must be restarted.
+  * Residual: the test code runs in the process that prints the counts, so a hostile
+    implementer can still forge a passing line and exit. The count check catches honest
+    mistakes, not forgery.
+  * 7 tests: emptied tests, an early exit and forged zero or failing counts, with and without
+    layout options; counts in status, approval and full and scoped review; `trusted check`;
+    tasks recorded with the old command refused; approval needing the counts; and the
+    forgeable limit, pinned. The test that kept the old default command now pins the new
+    one. 9 mutants all fail them: old default command, counts ignored by verify, check or
+    approval, zero tests or failures accepted, counts missing from the full or scoped
+    reviewer input or from status.
 * Security fix, independent audit finding AUD-03: a change could reach approval without its
   code being readable.
   * Preconditions: the implementer (or the repository) adds a `.gitattributes` rule such as

@@ -70,10 +70,10 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 162 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 169 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 12 Claude reviewer tests, 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), 11 scoped-review tests, 13 privacy-guard tests
-and 13 patch-visibility tests, many with adversarial subcases. On interpreters other than macOS
+`trusted check`, next steps, the project demo), 11 scoped-review tests, 13 privacy-guard tests,
+13 patch-visibility tests and 7 zero-test verification tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
 
@@ -135,7 +135,7 @@ m trusted approve TASK_ID --snapshot SNAPSHOT_SHA256 --founder 'Your Name'      
 m trusted export TASK_ID                                                          # 8. patch file; you apply it yourself
 ```
 
-* Use the layout options that match your project, or none for the original
+* Use the layout options that match your project, or none for the discovery of
   `unittest discover -s tests` from the repository root:
 
   | Project layout | Options |
@@ -269,12 +269,18 @@ not preserve the included bytes are refused too. Evidence uses a private index;
 it does not stage changes in the source repository.
 
 Verification materializes only the included set from the evidence tree and checks its
-hash before running exactly `python_runtime()[0] -I -B -m unittest discover -s tests`, or,
-for a task started with layout options, a constant first-party runner given the validated
-directories and glob as separate arguments (`-I -B -c <runner> [pythonpath…] -- -s DIR -p GLOB
-[-t TOP]`). Layout values are plain relative paths that must exist in the snapshot; there is
-no command, shell or interpreter option. A configured run fails when no test ran and
-records the test counts.
+hash before running a constant first-party runner: `python_runtime()[0] -I -B -c <runner>
+-- -s tests` without layout options (the same discovery as `-m unittest discover -s tests`),
+or, for a task started with layout options, the validated directories and glob as
+separate arguments (`-I -B -c <runner> [pythonpath…] -- -s DIR -p GLOB [-t TOP]`). Layout
+values are plain relative paths that must exist in the snapshot; there is no command,
+shell or interpreter option. A run passes only if it exits 0 **and** the runner's own
+count line reports at least one test and no failure or error. The counts are recorded,
+shown by `trusted status`, reported by `trusted check` and sent to the reviewer. A
+test process that exits early (for example `os._exit(0)` while tests are imported) or
+leaves no test fails. The test code runs in that same process and can print a passing
+count line itself, so a hostile implementer can still forge a pass: the check catches
+honest mistakes such as emptied tests, and the patch and the review remain the evidence.
 The unchanged Seatbelt policy permits writes only in that disposable copy, denies
 fork/network and limits runtime to 60 seconds. Exit status and bounded stdout are
 recorded; on failure the existing runner supplies a bounded stderr excerpt. The clone

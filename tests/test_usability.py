@@ -35,12 +35,14 @@ LAYOUT = trusted.verify_config(top_level_dir=".", pythonpath=["src"])
 
 
 class VerificationConfigTests(unittest.TestCase):
-    def test_no_options_keep_the_original_fixed_command(self):
+    def test_no_options_keep_the_original_discovery_through_the_runner(self):
+        # AUD-01: the old `-m unittest discover -s tests` passed with zero tests. The runner
+        # discovers the same way (-s tests) but fails when no test runs and records counts.
         self.assertIsNone(trusted.verify_config())
         self.assertIsNone(trusted.verify_config(pythonpath=[]))
-        original = [python_runtime()[0], "-I", "-B", "-m", "unittest", "discover", "-s", "tests"]
-        self.assertEqual(trusted.verification_command(), original)
-        self.assertEqual(trusted.verification_command(None), original)
+        default = [python_runtime()[0], "-I", "-B", "-c", trusted.VERIFY_RUNNER, "--", "-s", "tests"]
+        self.assertEqual(trusted.verification_command(), default)
+        self.assertEqual(trusted.verification_command(None), default)
 
     def test_layouts_become_a_constant_runner_with_paths_as_separate_arguments(self):
         cases = (
