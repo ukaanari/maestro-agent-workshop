@@ -23,7 +23,9 @@ Please include:
 
 This is a single-maintainer project with no service-level commitment. The maintainer
 will try to acknowledge reports within 7 days. Fixes are made on the default branch.
-Tagged releases are experimental pre-releases; only the latest one is supported.
+Tagged releases are experimental pre-releases; only the latest one is supported, and
+security fixes made after it (listed under "Unreleased" in the changelog) are on the
+default branch only until the next pre-release.
 
 ## In scope
 

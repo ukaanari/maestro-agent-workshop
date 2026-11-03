@@ -23,8 +23,9 @@ and that never hands an agent's output to a reviewer or a human without checking
 > adapters still refuse. The separate [Trusted Local Mode](#trusted-local-mode-experimental)
 > can launch the official Codex CLI and, optionally, a Claude Code reviewer with no built-in tools
 > **with your user permissions**; only its verifier is confined. The automated suite runs
-> offline with fake agents. Live runs have passed only on small bundled fixtures
-> ([Codex pilot](#first-live-pilot), [two-agent run](#two-agent-run)).
+> offline with fake agents. Live runs have passed on small bundled fixtures
+> ([Codex pilot](#first-live-pilot), [two-agent run](#two-agent-run)) and on one task in
+> one third-party repository ([tomli pilot](#third-party-pilot)); that is not general validation.
 > Do not use Trusted Local Mode to contain an untrusted agent.
 
 **New here?** [Quickstart: Trusted Local on your own repository](#quickstart-trusted-local-on-your-own-repository).
@@ -471,6 +472,20 @@ explicit instruction, and the approval record says so. The export passed
 `git apply --check` on a fresh clone and reproduced the evidence tree. The source
 repository was unchanged.
 
+<a id="third-party-pilot"></a>
+**Third-party pilot: tomli #312 (28 October 2026).** One live Trusted Local task on a local
+clone of [tomli](https://github.com/hukkin/tomli), a small pure-Python TOML parser, with
+one local acceptance test added for the issue (not upstream). Codex CLI 0.164.0
+(`gpt-6-luna`) changed only `src/tomli/_parser.py` to fix
+[hukkin/tomli#312](https://github.com/hukkin/tomli/issues/312). Confined verification
+passed (20 tests run, 1 skipped). Claude Code 2.1.296 (`claude-sonnet-5-5`) completed one
+full-context review with `no_blocking_findings` and one optional suggestion. The founder
+reviewed the patch, the verification and the review and decided to approve; the approve
+command was executed by an agent on that explicit instruction, and the approval record
+says so. The exported patch, applied to a fresh clone of upstream tomli, passed its suite
+under MAESTRO's confined verification (18 tests run, 1 skipped). The patch was not
+submitted upstream. This is one task on one repository, not general validation.
+
 ## Requirements
 
 * macOS with `/usr/bin/sandbox-exec`. It is present on current macOS, though Apple marks it
@@ -680,9 +695,10 @@ These are deliberate disclosures, not fine print. Trusted Local first, then Conf
   files: roughly 440 KB). The experimental scoped context sends far less, but it is a
   partial review and its relevance selection is approximate (see
   [Scoped review context](#scoped-review-context-experimental)).
-* **Live evidence is small.** Real Codex and Claude Code runs have passed only on bundled
-  synthetic fixtures. The project demo is synthetic too; no third-party repository has
-  been validated end to end yet.
+* **Live evidence is small.** Real Codex and Claude Code runs have passed on the bundled
+  synthetic fixtures and on one task in one third-party repository
+  ([tomli pilot](#third-party-pilot)). The project demo is synthetic. Nothing beyond that
+  has been validated live.
 * **In Confined Mode, only fake agents run.** The pipeline is proven with deterministic
   stand-ins that emit fixed edits and fixed verdicts. The review is *not* a semantic code
   review. Whether the real Codex CLI and Claude Code can run under MAESTRO's sandbox is
