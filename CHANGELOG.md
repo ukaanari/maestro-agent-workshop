@@ -38,9 +38,13 @@ describes work after the latest tag.
       every package and outside the layout, stops the review when the found file is
       changed, or when a changed file is inside that directory or imports/references a
       symbol from that file. Unchanged, unrelated scripts and embedded fixtures (such as
-      `examples/trusted-local/fixture`), standard-library names and third-party packages
-      are never reported. The reviewer is not launched, the attempt is `unavailable`, and
-      the message names the imports.
+      `examples/trusted-local/fixture`) are never reported, and neither is a name the
+      verification interpreter imports from its standard library or site-packages, so a
+      vendored `third_party/requests/` beside an installed `requests` does not block
+      `from requests import get`. A package that is not installed there, with a copy in
+      such a directory, is refused: that copy is the only one the run could load. The
+      reviewer is not launched, the attempt is `unavailable`, and the message names the
+      imports.
     * Tests are also recognised by the task's test directory and file pattern.
   * Token efficiency, measured offline on the exact reviewer input of both preserved tomli
     scoped tasks (1,011 files, `src/` layout) under `main` and under this change:
@@ -61,16 +65,19 @@ describes work after the latest tag.
   * Residual: chains longer than three hops, re-exports deeper than two initializers or
     through ordinary modules, dynamic imports, and a local file that shadows a
     standard-library module from an undeclared directory are not detected.
-  * 15 tests: the audit's lib/backend layouts, an undeclared root (in the selector, from a
+  * 16 tests: the audit's lib/backend layouts, an undeclared root (in the selector, from a
     changed importer outside the undeclared root, across a namespace directory, and end to
     end with a test package that edits `sys.path`), unrelated scripts and MAESTRO's own
     tracked fixture not blocking a scoped review, standard-library and third-party imports
-    beside local look-alikes, root precedence and name collisions checked against Python,
+    beside local look-alikes, a vendored copy of an installed package (`from requests
+    import get` and `requests.get(...)`) not blocking while an uninstalled one does, root precedence and name collisions checked against Python,
     relative imports across PEP 420 namespace package portions, a default-layout test
     helper shadowing a root module, a changed initializer reached through submodules (with
     the hop bound and module/directory collision invariants kept), the re-export cases,
     custom test directories and patterns, the layout reaching the selector end to end, and
-    an earlier-policy review refused at approval. All 42 mutants fail them.
+    an earlier-policy review refused at approval. In the offline mutation run, all 37
+    mutants fail them, including one that widens package expansion to changed ordinary
+    modules (it survived until the module/directory collision test was added).
 * Security fix, independent audit finding AUD-01: verification could pass with no test run.
   * Behaviour before: without layout options, verification ran
     `python -I -B -m unittest discover -s tests`, which on Python 3.9 exits 0 when no test

@@ -22,6 +22,7 @@ import os
 from pathlib import PurePosixPath
 import pkgutil
 import re
+import site
 import sys
 import sysconfig
 
@@ -51,7 +52,19 @@ def stdlib_names():
     return frozenset(names)
 
 
+def installed_names(directories=None):
+    """Top-level modules the verification interpreter loads from its own site-packages.
+
+    The verification run (`-I`) keeps the interpreter's existing site-packages directories
+    on sys.path, so an installed package is what an unresolved import of its name loads.
+    """
+    if directories is None:
+        directories = [d for d in site.getsitepackages() if os.path.isdir(d)]
+    return frozenset(m.name for m in pkgutil.iter_modules(directories))
+
+
 STDLIB = stdlib_names()
+EXTERNAL = STDLIB | installed_names()   # never reported as unresolved local imports
 
 
 def is_test(path, layout=None):
@@ -335,13 +348,14 @@ def unresolved(parsed, resolver, changed):
     """Absolute imports that resolve nowhere, although a file in a plain directory carries the name.
 
     Such a directory is a sys.path entry the task's layout does not declare: a changed file
-    inside it, or a file a changed module imports from it, may be what really runs. Standard-library
-    names, unrelated fixtures and third-party packages are never reported.
+    inside it, or a file a changed module imports from it, may be what really runs. Names the
+    verification interpreter loads from its standard library or site-packages are never
+    reported, so a vendored copy of an installed package is not; unrelated fixtures are not either.
     """
     found = set()
     for path, info in parsed.items():
         for level, name, names in info["imports"]:
-            if level or name.split(".")[0] in STDLIB or resolver.resolve(name):
+            if level or name.split(".")[0] in EXTERNAL or resolver.resolve(name):
                 continue
             for candidate in [name] + [name + "." + child for child in names if child != "*"]:
                 if resolver.resolve(candidate):

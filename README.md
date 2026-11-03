@@ -70,9 +70,9 @@ flow documented below.
 | Token or cost metering | **Not implemented.** Confined Mode calls no model; Trusted Local stores Codex's own usage report as an unverified claim. |
 | `maestro.py doctor`: read-only prerequisite check that exercises the real sandbox, a confined fake worker and Git | **Implemented, tested** |
 
-The suite has 181 offline tests: the original 80 listed below, plus 19 Trusted Local
+The suite has 186 offline tests: the original 80 listed below, plus 19 Trusted Local
 acceptance tests, 12 Claude reviewer tests, 14 usability tests (verification layouts,
-`trusted check`, next steps, the project demo), 22 scoped-review tests, 13 privacy-guard tests,
+`trusted check`, next steps, the project demo), 27 scoped-review tests, 13 privacy-guard tests,
 13 patch-visibility tests and 8 zero-test verification tests, many with adversarial subcases. On interpreters other than macOS
 `/usr/bin/python3` (3.9) the Trusted Local tests are skipped, matching what the mode
 itself requires:
@@ -428,8 +428,12 @@ and the export, and it is **not a full-repository review**.
     changed, or when a changed file is inside that directory or imports/references a
     symbol from that file. Such a directory is a `sys.path` entry the layout does not
     declare (for example a test package that edits `sys.path`). Unchanged, unrelated
-    scripts and embedded fixtures, standard-library names and third-party packages are
-    never reported. Restart the task with the matching layout, or use the full context.
+    scripts and embedded fixtures are never reported, and neither is any name the
+    verification interpreter imports from its standard library or site-packages, so a
+    vendored copy of an installed package (`third_party/requests/` beside an installed
+    `requests`) does not block. A package that is not installed there but has a copy in
+    such a directory is refused, because that copy is the only one the run could load.
+    Restart the task with the matching layout, or use the full context.
   A scoped review recorded under an earlier policy never approves: reject the task and
   start it again.
 * **Recorded:** the `review.N` artifact holds the policy version, budget, status,

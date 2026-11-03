@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -346,6 +347,35 @@ class ScopedLayoutTests(unittest.TestCase):
         # A third-party name never resolves to a vendored copy outside the layout.
         self.assertNotIn("third_party/requests/__init__.py", selection["critical"])
         self.assertNotIn("app/requests.py", selection["critical"])
+
+    def test_a_vendored_copy_of_an_installed_package_is_not_unresolved(self):
+        # An unrelated third_party/requests beside an installed requests: the run loads the installed one.
+        base = {"app/__init__.py": "", "app/core.py": "def run():\n    return 1\n",
+                "third_party/requests/__init__.py": "def get(url):\n    return None\n",
+                "tests/__init__.py": "", "tests/test_core.py": "import unittest\nfrom app.core import run\n"}
+        layout = trusted.verify_config(top_level_dir=".")
+        uses = ("from requests import get\n\ndef run():\n    return get('x')\n",
+                "import requests\n\ndef run():\n    return requests.get('x')\n")
+        with mock.patch.object(context, "EXTERNAL", context.STDLIB | {"requests"}):
+            for body in uses:
+                selection = scoped(base, {"app/core.py": body}, layout=layout)
+                self.assertEqual((selection["status"], selection["unresolved_imports"]), ("selected", []))
+                self.assertNotIn("third_party/requests/__init__.py", selection["critical"])
+        # Not installed: the vendored copy is the only one the run could load, so it fails closed.
+        with mock.patch.object(context, "EXTERNAL", context.STDLIB):
+            for body in uses:
+                self.assertEqual(scoped(base, {"app/core.py": body}, layout=layout)["status"], "unresolved-imports")
+        # Installed means the interpreter's own site-packages, as its -I verification run sees them.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "mfakepkg").mkdir()
+            (Path(d) / "mfakepkg" / "__init__.py").write_text("")
+            (Path(d) / "mfakemod.py").write_text("")
+            self.assertEqual(context.installed_names([d]), {"mfakepkg", "mfakemod"})
+        probe = ("import pkgutil, sys\nprint(' '.join(sorted(m.name for m in pkgutil.iter_modules("
+                 "[p for p in sys.path if p.endswith('site-packages')]))))")
+        ran = subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True, text=True, timeout=60)
+        self.assertEqual(sorted(context.installed_names()), ran.stdout.split(), ran.stderr)
+        self.assertTrue(context.installed_names() <= context.EXTERNAL)
 
     def test_root_precedence_and_collisions_follow_python(self):
         # Each case: files, sys.path roots, module -> what the resolver says Python loads.
