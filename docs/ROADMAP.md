@@ -19,9 +19,13 @@ phase by phase.
   suite in a confined copy of the snapshot; hash-bound approval; patch export.
 * **Claude Code reviewer** (`v0.3.0-alpha`): an optional fresh, tool-less review bound to
   the snapshot and patch, gating approval.
-* **Usability MVP** (`v0.4.0-alpha`, unreleased): explicit verification layouts,
+* **Usability MVP** (`v0.4.0-alpha`): explicit verification layouts,
   read-only `trusted check`, next-step hints, a multi-file offline project demo and a
   quickstart.
+* **Third-party pilot:** one live Trusted Local task on tomli #312, from Codex
+  implementation to founder-approved export (README, "Third-party pilot").
+* **After `v0.4.0-alpha`, on the default branch (unreleased):** an experimental scoped
+  review context, and fixes for findings of an independent audit (see the changelog).
 
 ## Planned: P1-B, real agent adapters inside the existing sandbox
 
@@ -72,7 +76,7 @@ the result is documented.
 
 * Trusted Local verification beyond the standard library: pytest and third-party test
   dependencies, without granting personal site-packages or the network.
-* Validation on independently maintained third-party repositories.
+* Validation on more independently maintained third-party repositories (one pilot so far).
 * Usage and session limits, only where the official CLI actually enforces them. MAESTRO
   will not claim hard token caps based on usage reported after the fact.
 * An isolation backend for Linux.
