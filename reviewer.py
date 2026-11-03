@@ -245,12 +245,13 @@ def build_input(task_id, task, snap, patch, changes, bodies, verification):
     return data, patch_sha256
 
 
-def build_scoped_input(task_id, task, snap, patch, changes, before, after, verification, budget):
+def build_scoped_input(task_id, task, snap, patch, changes, before, after, verification, budget, layout=None):
     """Scoped stdin bytes, its context record and the canonical audit (every file, kept locally).
 
     `after` must be exactly the snapshot's files (checked against the manifest by hash and
     mode); `before` is the base tree, for deleted files and removed import edges. The
-    budget charges every byte sent, header and task text included.
+    budget charges every byte sent, header and task text included. `layout` is the task's
+    verification layout, whose sys.path the selector resolves imports against.
     """
     files = {rel: e for rel, e in snap["manifest"].items() if e["type"] == "file"}
     if set(files) != set(after):
@@ -291,7 +292,7 @@ def build_scoped_input(task_id, task, snap, patch, changes, before, after, verif
         payload["context_sha256"] = hashlib.sha256(context.canonical(payload)).hexdigest()
         return header + json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=False).encode("utf-8")
 
-    data, audit, selection = context.select(before, after, render, budget_bytes)
+    data, audit, selection = context.select(before, after, render, budget_bytes, layout)
     document = json.loads(data[len(header):])
     record = {"mode": "scoped", "policy": context.POLICY, "budget_estimated_tokens": budget,
               "status": selection["status"], "context_sha256": document["context_sha256"],
@@ -299,7 +300,7 @@ def build_scoped_input(task_id, task, snap, patch, changes, before, after, verif
               "snapshot_file_count": len(files), "included": selection["selected"],
               "included_count": len(selection["selected"]), "omitted_count": selection["omitted_count"],
               "critical_omitted": selection["critical_omitted"], "direct_tests": selection["direct_tests"],
-              "indirect_tests": selection["indirect_tests"],
+              "indirect_tests": selection["indirect_tests"], "unresolved_imports": selection["unresolved_imports"],
               "parse_failures": selection["parse_failures"], "mandatory_bytes": selection["mandatory_bytes"],
               "payload_bytes": len(data), "estimated_tokens": (len(data) + 3) // 4,
               "limitations": list(context.LIMITATIONS)}

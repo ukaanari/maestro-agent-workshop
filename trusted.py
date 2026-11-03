@@ -851,6 +851,11 @@ class TrustedEngine:
             raise PolicyError("offline-fixture review requires a test task and explicit test context")
         scoped = requested.get("context") == "scoped"
         scope = record.get("context") if scoped else None
+        if scoped and isinstance(scope, dict) and scope.get("policy") != reviewer.SCOPED_POLICY:
+            # A review chosen under an earlier policy (v2 missed layouts and initializers) never approves.
+            raise PolicyError("scoped review context evidence mismatch: the review used context policy %r, not the "
+                              "current %r; reject this task and start it again" % (scope.get("policy"),
+                                                                                  reviewer.SCOPED_POLICY))
         if scoped and (not isinstance(scope, dict) or scope.get("mode") != "scoped" or
                        scope.get("policy") != reviewer.SCOPED_POLICY or scope.get("status") != "selected" or
                        scope.get("budget_estimated_tokens") != requested.get("budget_estimated_tokens")):
@@ -1009,7 +1014,8 @@ class TrustedEngine:
             # Presentation policy only: the full snapshot and exact patch stay the bound evidence.
             data, patch_sha256, scope, audit = reviewer.build_scoped_input(
                 task_id, task["spec"]["prompt"], snap, patch, files, tree_blobs(clone, home, snap["base"] + "^{tree}"),
-                tree_blobs(clone, home, snap["tree"]), verification, task["spec"]["review"]["budget_estimated_tokens"])
+                tree_blobs(clone, home, snap["tree"]), verification, task["spec"]["review"]["budget_estimated_tokens"],
+                task["spec"].get("verify"))
             audit_path = folder / "context-audit.json"
             atomic_write(audit_path, audit)
             audit_path.chmod(0o400)
@@ -1032,6 +1038,11 @@ class TrustedEngine:
         if scoped and scope["status"] != "selected":
             # Never send an incomplete context: no launch, a precise reason, the prompt kept as evidence.
             record["outcome"] = "unavailable"
+            if scope["status"] == "unresolved-imports":
+                raise PolicyError("scoped review not launched (unresolved-imports): local imports resolve to no file "
+                                  "under the verification layout: %s; start the task with the layout that matches "
+                                  "the project (--pythonpath, --top-level-dir) or use the full context"
+                                  % "; ".join(scope["unresolved_imports"][:5]))
             reason = ("mandatory changed content alone exceeds the budget (%d > %d bytes)"
                       % (scope["mandatory_bytes"], min(scope["budget_estimated_tokens"] * 4, reviewer.MAX_INPUT))
                       if scope["status"] == "budget-exceeded" else
