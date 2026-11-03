@@ -52,7 +52,9 @@ HOME_ALLOWED = {"runner", "you", "me", "user", "username", "name", "example", "s
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
 EMAIL_DOMAINS = re.compile(r"(?i)(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost|"
                            r"users\.noreply\.github\.com|noreply\.github\.com)$")
-EMAIL_ADDRESSES = {"noreply@anthropic.com", "git@github.com", "git@gitlab.com", "git@bitbucket.org"}
+# noreply@github.com: GitHub's own committer for squash merges and web edits, never a person.
+EMAIL_ADDRESSES = {"noreply@anthropic.com", "noreply@github.com", "git@github.com", "git@gitlab.com",
+                   "git@bitbucket.org"}
 
 # Paths that should never be tracked here, whatever they contain.
 FORBIDDEN = [

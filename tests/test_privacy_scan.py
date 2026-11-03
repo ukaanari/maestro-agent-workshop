@@ -156,6 +156,34 @@ class PrivacyScanTests(unittest.TestCase):
         self.assertNotIn(personal, output)
         self.assertEqual(self.scan("push", stdin="refs/heads/gone %s refs/heads/gone %s\n" % ("0" * 40, tip))[0], 0)
 
+    def test_github_service_committer_passes_but_its_personal_author_does_not(self):
+        # A squash merge on GitHub is committed by "GitHub <noreply@github.com>"; its author stays checked.
+        self.write("a.py", "x = 1\n")
+        self.git("commit", "-q", "-m", "base")
+        base = self.git("rev-parse", "HEAD").strip()
+        service = {"GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": "noreply" + "@" + "github.com"}
+        self.write("b.py", "y = 2\n")
+        self.git("commit", "-q", "-m", "squash merge", env=service)
+        merged = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (merged, base))
+        self.assertEqual(code, 0, output)
+        personal = "alice.jones" + "@" + "gmail.com"
+        self.write("c.py", "z = 3\n")
+        self.git("commit", "-q", "-m", "squash merge", env=dict(service, GIT_AUTHOR_EMAIL=personal))
+        tip = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (tip, merged))
+        self.assertEqual(code, 1, output)
+        self.assertIn("commit %s author" % tip[:12], output)
+        self.assertNotIn("committer", output)
+        self.assertNotIn(personal, output)
+        # Only that exact service address: another github.com address is still personal.
+        self.write("d.py", "w = 4\n")
+        self.git("commit", "-q", "-m", "web edit", env=dict(service, GIT_COMMITTER_EMAIL="alice" + "@" + "github.com"))
+        last = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (last, tip))
+        self.assertEqual(code, 1, output)
+        self.assertIn("commit %s committer" % last[:12], output)
+
     def test_private_terms_come_only_from_a_local_list_and_are_not_printed(self):
         self.write("notes.md", "Shared design notes for Project Bluebird.\n")
         self.assertEqual(self.scan("staged")[0], 0)
