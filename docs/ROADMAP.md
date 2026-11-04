@@ -79,7 +79,25 @@ the result is documented.
 * Validation on more independently maintained third-party repositories (one pilot so far).
 * Usage and session limits, only where the official CLI actually enforces them. MAESTRO
   will not claim hard token caps based on usage reported after the fact.
-* An isolation backend for Linux.
+
+## Planned: dogfooding and reliability
+
+* Use small, explicitly authorized MAESTRO-owned tasks to exercise the existing Trusted
+  Local flow; record the task, environment, outcome and limitations without claiming
+  broader validation. Agents remain unconfined in this mode.
+* Turn reproducible failures into focused regression tests and document blocked or
+  unsupported cases. Keep verification, review and approval evidence tied to the snapshot.
+* Re-run the offline suite and document compatibility changes as environments evolve;
+  track the experimental Python 3.15 gap in [#7](https://github.com/ukaanari/maestro-agent-workshop/issues/7).
+
+## Planned: feasibility research
+
+* Investigate sandboxed Rust/Cargo verification, including offline dependencies, build
+  scripts, process cleanup and evidence binding ([#22](https://github.com/ukaanari/maestro-agent-workshop/issues/22)).
+* Evaluate a fail-closed Linux sandbox backend and its host prerequisites and security
+  tests ([#23](https://github.com/ukaanari/maestro-agent-workshop/issues/23)).
+
+These are research questions, not implemented capabilities or release commitments.
 
 ## Explicit non-goals for now
 
