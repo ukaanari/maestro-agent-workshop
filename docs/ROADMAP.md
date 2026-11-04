@@ -80,13 +80,6 @@ the result is documented.
 * Usage and session limits, only where the official CLI actually enforces them. MAESTRO
   will not claim hard token caps based on usage reported after the fact.
 
-
-## Explicit non-goals for now
-
-Dashboards, planning agents, multi-agent swarms, automatic retries, automatic commits,
-pushes or merges, and any silent fallback to unconfined execution or paid API usage.
-
-
 ## Planned: dogfooding and reliability
 
 * Use small, explicitly authorized MAESTRO-owned tasks to exercise the existing Trusted
@@ -105,3 +98,8 @@ pushes or merges, and any silent fallback to unconfined execution or paid API us
   tests ([#23](https://github.com/ukaanari/maestro-agent-workshop/issues/23)).
 
 These are research questions, not implemented capabilities or release commitments.
+
+## Explicit non-goals for now
+
+Dashboards, planning agents, multi-agent swarms, automatic retries, automatic commits,
+pushes or merges, and any silent fallback to unconfined execution or paid API usage.
