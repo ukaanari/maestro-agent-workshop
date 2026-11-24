@@ -9,7 +9,7 @@ import sys
 
 from agents import SCENARIOS
 import doctor
-from execution import Cancelled, PolicyError
+from execution import Cancelled, DeadlineExceeded, PolicyError
 from workflow import Engine, Store
 
 __version__ = "0.4.0-alpha"
@@ -72,7 +72,7 @@ def main(argv=None, *, test_context=False):
     check.add_argument("--repo", type=Path, required=True)
     check.add_argument("--base", required=True)
     add_verify_options(check)
-    for name in ("implement", "verify", "review", "diff", "approve", "reject", "cancel", "export", "status"):
+    for name in ("implement", "verify", "review", "diff", "approve", "reject", "cancel", "recover", "export", "status"):
         cmd = commands.add_parser(name)
         cmd.add_argument("task_id")
         if name == "implement":
@@ -125,7 +125,7 @@ def main(argv=None, *, test_context=False):
                 return 0
             else:
                 result = getattr(trusted_engine, action)(args.task_id)
-            if action in ("start", "implement", "verify", "approve", "reject", "cancel"):
+            if action in ("start", "implement", "verify", "approve", "reject", "cancel", "recover"):
                 result["next"] = trusted_engine.next_steps(result)
             print(json.dumps(result, indent=2, ensure_ascii=True))
             expected = {"start": "preparing", "implement": "reviewing", "verify": "awaiting_approval"}
@@ -162,9 +162,12 @@ def main(argv=None, *, test_context=False):
         if args.command == "run" and result["status"] != "awaiting_approval":
             return 2
         return 0
-    except (PolicyError, Cancelled, OSError, ValueError, sqlite3.Error) as exc:
+    except (PolicyError, Cancelled, DeadlineExceeded, OSError, ValueError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print(json.dumps({"error": "interrupted"}), file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
