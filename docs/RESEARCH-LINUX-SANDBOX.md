@@ -37,12 +37,13 @@ native Linux mechanisms were evaluated:
       Debian hardened kernels may also disable `kernel.unprivileged_userns_clone`.
   * For cgroups v2 limits: systemd user slice delegation (`systemd-run --user --scope` or a
     delegated user cgroup directory).
-* **Threat boundary:** Strongest unprivileged isolation on Linux. Mount namespaces completely hide
-  `$HOME`, `.maestro/`, and unrelated host files (the sandboxed process never even sees their
-  directory entries). `CLONE_NEWNET` creates an isolated loopback-only network namespace with zero
-  host connectivity. `CLONE_NEWPID` completely prevents inspecting or signalling host processes and
-  eliminates the `#2` `setsid()`/double-fork escape gap because the kernel SIGKILLs every process
-  in a PID namespace when its init process exits.
+* **Threat boundary:** Strongest unprivileged isolation candidate on Linux. Mount namespaces are
+  intended to hide `$HOME`, `.maestro/`, and unrelated host files (the sandboxed process never
+  sees their directory entries). `CLONE_NEWNET` creates an isolated loopback-only network
+  namespace intended to block host connectivity. `CLONE_NEWPID` is a strong candidate mechanism
+  to prevent inspecting or signalling host processes and to address the `#2` `setsid()`/double-fork
+  escape gap (kernel SIGKILL of PID namespace members on init exit plus `cgroup.kill`), though
+  every property remains **unverified until tested on a real Linux host**.
 * **Trade-offs:** Requires one small distro binary (`/usr/bin/bwrap`) and unprivileged user
   namespaces; kernel userns attack surface must stay patched.
 
@@ -76,7 +77,7 @@ native Linux mechanisms were evaluated:
 | Filesystem deny-default | Mount namespace (complete hiding) | Landlock allowlist (paths stay visible in stat/parent) |
 | Network isolation | `CLONE_NEWNET` (zero host routes, kernel-enforced) | Landlock v4 (TCP only, kernel ≥ 6.7) + seccomp for UDP/AF_UNIX |
 | Process visibility & signals | `CLONE_NEWPID` + private `/proc` (complete) | Needs `/proc` deny + `ptrace`/signal seccomp |
-| Escaped descendants (#2) | **Solved** by `CLONE_NEWPID` + `cgroup.kill` | **Not solved** without PID ns or cgroups v2 |
+| Escaped descendants (#2) | **Candidate control (unverified until Linux POC):** `CLONE_NEWPID` + `cgroup.kill` | **Not addressed** without PID ns or cgroups v2 |
 | Resource limits (#5) | cgroups v2 (`memory.max`, `pids.max`, `cpu.max`) + `RLIMIT_*` | `RLIMIT_*` only (per-process, weak against forks) |
 | External dependency | `/usr/bin/bwrap` | None (but raw `ctypes` syscalls + BPF per arch) |
 | Restricted-userns environments | Blocked (fails closed → `blocked`) | Works on kernel ≥ 6.7 |
@@ -128,24 +129,44 @@ stat -fc %T /sys/fs/cgroup   # expect cgroup2fs
 realpath /usr/bin/bwrap && ls -la /usr/bin/bwrap
 
 # 2. Smoke-test deny-default mount + PID + net isolation without touching $HOME
+#    Uses ONLY local loopback canary and RFC 5737 TEST-NET (192.0.2.1); never contacts public IPs.
 WORK=$(mktemp -d)
-bwrap --unshare-all --die-with-parent --new-session --clearenv \
-  --ro-bind /usr /usr --ro-bind /lib /lib \
-  --symlink /usr/lib64 /lib64 \
-  --proc /proc --dev /dev --tmpfs /tmp \
-  --bind "$WORK" /work --chdir /work \
-  /usr/bin/python3 -I -B -c '
-import os, socket, pathlib
+python3 -c '
+import os, socket, subprocess, sys
+srv = socket.socket()
+srv.bind(("127.0.0.1", 0))
+srv.listen(1)
+port = srv.getsockname()[1]
+probe = """
+import os, pathlib, socket
 assert not pathlib.Path("/etc/passwd").exists(), "host /etc leaked"
 assert len([p for p in os.listdir("/proc") if p.isdigit()]) <= 3, "host PIDs visible"
-try:
-    socket.create_connection(("1.1.1.1", 443), timeout=1)
-    raise AssertionError("network unexpectedly succeeded")
-except OSError:
-    pass
-pathlib.Path("/work/ok.txt").write_text("confined\n")
+for target in (("127.0.0.1", %d), ("192.0.2.1", 443)):
+    try:
+        socket.create_connection(target, timeout=0.5)
+        raise AssertionError("network unexpectedly succeeded: " + str(target))
+    except OSError:
+        pass
+pathlib.Path("/work/ok.txt").write_text("confined\\n")
 print("bwrap-poc: ok")
-'
+""" % port
+res = subprocess.run([
+    "bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv",
+    "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib",
+    "--symlink", "/usr/lib64", "/lib64",
+    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--bind", sys.argv[1], "/work", "--chdir", "/work",
+    "/usr/bin/python3", "-I", "-B", "-c", probe,
+], check=True)
+srv.settimeout(0.1)
+try:
+    srv.accept()
+    raise AssertionError("host loopback canary unexpectedly received a connection")
+except socket.timeout:
+    pass
+finally:
+    srv.close()
+' "$WORK"
 rm -rf "$WORK"
 ```
 
@@ -168,8 +189,9 @@ support or ship a production backend yet).
 
 * It maps 1:1 to `sandbox.py`'s `ExecPolicy` abstraction (`SandboxBackend` interface cleanly
   separating `Seatbelt` on macOS from a future `BubblewrapSandbox` on Linux).
-* Unlike macOS Seatbelt, `CLONE_NEWPID` + `cgroup.kill` natively eliminates the `#2` escaped-
-  descendant cleanup gap and provides a clean path for `#5` resource limits.
+* Unlike macOS Seatbelt, `CLONE_NEWPID` + `cgroup.kill` offers a strong candidate mechanism for
+  the `#2` escaped-descendant cleanup gap and `#5` resource limits (both remain unverified until
+  exercised with adversarial probes on a real Linux kernel).
 * Mount namespaces provide stronger path hiding than SBPL path rules and avoid deprecated OS APIs.
 
 ### Remaining Blockers & Security Tests Required Before Any Production Claim

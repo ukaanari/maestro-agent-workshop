@@ -87,7 +87,8 @@ Rust compilation executes untrusted native code at **three** distinct stages:
 Once a standalone Rust toolchain is installed outside `$HOME` (e.g. `/opt/maestro-toolchains/rust-1.x`):
 
 1. Create a tiny zero-dependency fixture crate (`Cargo.toml`, `Cargo.lock`, `src/lib.rs` with one
-   passing test and one adversarial test attempting `std::net::TcpStream::connect("1.1.1.1:443")`,
+   passing test and one adversarial test attempting to connect to a local loopback canary listener
+   on `127.0.0.1:<ephemeral_port>` and RFC 5737 TEST-NET `192.0.2.1:443` — never a public IP —
    reading `$HOME`, writing `<task>/clone`, and spawning a `setsid()` child).
 2. Materialize a disposable copy `<tmp>/verify/` and run `cargo test --offline --locked --frozen`
    under a candidate Seatbelt profile with `allow_fork=True` and `(deny network*)`.
