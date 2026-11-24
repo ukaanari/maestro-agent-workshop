@@ -45,11 +45,14 @@ class ProvidersCatalogTests(unittest.TestCase):
         self.assertEqual(data["schema"], providers.SCHEMA)
         self.assertEqual(data["version"], maestro.__version__)
         self.assertTrue(data["read_only"])
+        self.assertEqual(data["catalog_scope"], "static_architecture_only")
         self.assertEqual(data["discovery"], {
+            "host_probed": False,
             "executes_agents": False,
             "reads_credentials": False,
             "initializes_state": False,
             "checks_host_binaries": False,
+            "host_check_command": "maestro.py doctor",
         })
         self.assertTrue(all(v is False for v in data["unsupported"].values()))
 
@@ -83,10 +86,16 @@ class ProvidersCatalogTests(unittest.TestCase):
             self.assertEqual(p["kind"], "synthetic")
             self.assertFalse(p["real_agent"])
             self.assertEqual(p["supported_modes"], ["confined"])
-            self.assertTrue(p["availability_by_mode"]["confined"]["available"])
+            self.assertEqual(p["host_availability"]["status"], "bundled_first_party")
+            self.assertFalse(p["host_availability"]["probed"])
+            self.assertTrue(p["availability_by_mode"]["confined"]["supported_in_architecture"])
             self.assertTrue(p["availability_by_mode"]["confined"]["confined_by_maestro"])
-            self.assertFalse(p["availability_by_mode"][trusted.MODE]["available"])
+            self.assertFalse(p["availability_by_mode"][trusted.MODE]["supported_in_architecture"])
+            self.assertNotIn("available", p["availability_by_mode"]["confined"])
             self.assertFalse(p["capabilities"]["real_model_calls"])
+            self.assertTrue(p["os_permissions"]["confined_by_maestro"])
+            self.assertEqual(p["os_permissions"]["privilege_level"], "macos_seatbelt_deny_default")
+            self.assertFalse(p["cli_approval_permissions"]["can_approve_or_export"])
 
         for real_id, role in (("codex", "implement"), (reviewer.PROVIDER, "review")):
             p = by_id[real_id]
@@ -94,21 +103,34 @@ class ProvidersCatalogTests(unittest.TestCase):
             self.assertEqual(p["kind"], "real-cli")
             self.assertTrue(p["real_agent"])
             self.assertEqual(p["supported_modes"], [trusted.MODE])
-            self.assertFalse(p["availability_by_mode"]["confined"]["available"])
-            self.assertTrue(p["availability_by_mode"][trusted.MODE]["available"])
+            self.assertEqual(p["host_availability"]["status"], "not_checked")
+            self.assertFalse(p["host_availability"]["probed"])
+            self.assertTrue(p["host_availability"]["requires_external_cli"])
+            self.assertFalse(p["availability_by_mode"]["confined"]["supported_in_architecture"])
+            self.assertTrue(p["availability_by_mode"][trusted.MODE]["supported_in_architecture"])
+            self.assertEqual(p["availability_by_mode"][trusted.MODE]["host_availability"], "not_checked_use_doctor")
             self.assertFalse(p["availability_by_mode"][trusted.MODE]["confined_by_maestro"])
-            self.assertFalse(p["capabilities"]["confined_by_maestro"])
+            self.assertNotIn("available", p["availability_by_mode"][trusted.MODE])
+            self.assertFalse(p["os_permissions"]["confined_by_maestro"])
+            self.assertEqual(p["os_permissions"]["privilege_level"], "unconfined_current_user")
+            self.assertFalse(p["os_permissions"]["descendant_cleanup_guaranteed"])
+            self.assertFalse(p["cli_approval_permissions"]["can_approve_or_export"])
+            self.assertEqual(p["cli_approval_permissions"]["maestro_approval_authority"],
+                             "none_human_exact_hash_required")
             self.assertIn("NOT confined by MAESTRO", p["confinement_warning"])
 
         self.assertEqual(by_id["codex"]["environment_forwarded"], list(trusted.CHILD_ENV))
         self.assertFalse(by_id["codex"]["capabilities"]["model_fallback"])
         self.assertFalse(by_id["codex"]["capabilities"]["automatic_retries"])
+        self.assertTrue(by_id["codex"]["cli_approval_permissions"]["can_modify_clone_directly"])
+        self.assertIn("-a", by_id["codex"]["cli_approval_permissions"]["cli_flags_applied"])
 
         claude = by_id[reviewer.PROVIDER]
         self.assertEqual(claude["environment_forwarded"], list(reviewer.CHILD_ENV))
         self.assertEqual(claude["review_contexts"], ["full", "scoped"])
         self.assertEqual(claude["protocols"], {"full": reviewer.PROTOCOL, "scoped": reviewer.SCOPED_PROTOCOL})
-        self.assertFalse(claude["capabilities"]["can_modify_files_or_approve"])
+        self.assertFalse(claude["cli_approval_permissions"]["can_modify_clone_directly"])
+        self.assertIn("--tools", claude["cli_approval_permissions"]["cli_flags_applied"])
 
     def test_never_initializes_or_touches_state_root(self):
         missing_root = self.base / "never_created"
