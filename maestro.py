@@ -36,6 +36,7 @@ def main(argv=None, *, test_context=False):
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent / ".maestro")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="check host prerequisites; changes nothing")
+    sub.add_parser("providers", help="describe available modes and agent providers; changes nothing")
     create = sub.add_parser("create", help="create a fake-only task in a synthetic repo")
     create.add_argument("title")
     create.add_argument("--file", default="result.txt")
@@ -95,6 +96,12 @@ def main(argv=None, *, test_context=False):
         report = dict(doctor.run_checks(args.root), version=__version__)
         print(json.dumps(report, indent=2, ensure_ascii=True))
         return 0 if report["ok"] else 2
+    if args.command == "providers":
+        # Before Store(): describing providers must never create or adopt a state root,
+        # execute an agent binary, or read credentials.
+        import providers
+        print(json.dumps(providers.catalog(version=__version__), indent=2, ensure_ascii=True))
+        return 0
     try:
         if args.command == "trusted" and args.trusted_command == "check":
             # Like doctor: a compatibility check never creates or adopts a state root.

@@ -666,6 +666,7 @@ committed or pushed. Clean up with `rm -rf "$(dirname "$ROOT")"`.
 
 ```sh
 python3 maestro.py doctor
+python3 maestro.py providers
 python3 maestro.py create 'Create a greeting' --file greeting.txt --content 'Hello MAESTRO'
 python3 maestro.py run TASK_ID
 python3 maestro.py status TASK_ID
@@ -691,12 +692,13 @@ value is an audit label typed by the operator, not authentication.
 
 ## How it works
 
-Nine small Python modules (about 2,800 lines in total):
+Ten small Python modules (standard library only):
 
 | Module | Responsibility |
 |---|---|
 | `maestro.py` | CLI and JSON output |
 | `doctor.py` | Read-only prerequisite checks, run through the production sandbox and Git code paths |
+| `providers.py` | Read-only static capability catalog describing Confined Mode, Trusted Local Mode, synthetic fakes and real CLIs without executing agents or reading credentials |
 | `workflow.py` | SQLite state machine, event log, single-attempt engine, evidence gates |
 | `workspace.py` | Synthetic Git worktrees, path policy, bounded full-content snapshots |
 | `execution.py` | Owned process groups, cancellation, time and output limits |
