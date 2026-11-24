@@ -3,16 +3,19 @@
 No model, login, network service or credentials.
 """
 import importlib.util
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import trusted
+from execution import PolicyError
 from workflow import Store
 
 FAKE_CODEX = ROOT / "tests" / "fixtures" / "fake_codex.py"
@@ -60,17 +63,54 @@ class DogfoodingIntegrationTests(unittest.TestCase):
     def git(self, cwd, *args):
         return trusted.git(cwd, self.root, *args)
 
+    def materialize_non_shallow_maestro_head(self):
+        """Export MAESTRO HEAD into a clean, non-shallow temporary Git repository.
+
+        GitHub Actions checkouts are shallow (fetch-depth: 1), and MAESTRO's
+        clone_config() intentionally refuses shallow clone metadata. Building a
+        standalone commit from `git archive HEAD` keeps the test offline and
+        preserves the security check intact.
+        """
+        repo = self.root / "maestro-self"
+        repo.mkdir()
+        archive = self.git(ROOT, "archive", "--format=tar", "HEAD")
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tf:
+            for member in tf.getmembers():
+                if member.name.startswith("/") or ".." in Path(member.name).parts:
+                    self.fail("unexpected archive member: " + member.name)
+                if not (member.isdir() or member.isreg()):
+                    self.fail("unexpected archive entry type: " + member.name)
+            tf.extractall(repo)
+        self.git(repo, "init", "-q")
+        self.git(repo, "config", "user.name", "MAESTRO Test")
+        self.git(repo, "config", "user.email", "maestro-test@example.invalid")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "snapshot of MAESTRO HEAD for offline self-check")
+        base = self.git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        return repo, base
+
     @unittest.skipUnless((ROOT / ".git").exists(), "needs the MAESTRO Git checkout")
     def test_01_maestro_self_check_on_pure_stdlib_test_subset(self):
-        base = self.git(ROOT, "rev-parse", "HEAD").decode("ascii").strip()
+        repo, base = self.materialize_non_shallow_maestro_head()
         verify = trusted.verify_config(test_dir="tests", pattern="test_check_suite.py")
-        report = trusted.check(ROOT, base, verify)
+        report = trusted.check(repo, base, verify)
         self.assertTrue(report["compatible"])
+        self.assertTrue(report["source_clean"])
         self.assertTrue(report["baseline"]["passed"], report)
         self.assertEqual(report["baseline"]["summary"]["executed"], 8)
         self.assertEqual(report["baseline"]["summary"]["failures"], 0)
         self.assertEqual(report["baseline"]["summary"]["errors"], 0)
-        self.assertIn("source_clean", report)
+
+        # Security check remains intact: a shallow source repo must still be refused.
+        (repo / "SHALLOW_PROBE.txt").write_text("second commit\n")
+        self.git(repo, "add", "SHALLOW_PROBE.txt")
+        self.git(repo, "commit", "-q", "-m", "second commit for shallow clone check")
+        shallow = self.root / "maestro-shallow"
+        self.git(self.root, "clone", "--quiet", "--depth", "1", repo.as_uri(), str(shallow))
+        self.assertTrue((shallow / ".git" / "shallow").exists())
+        shallow_base = self.git(shallow, "rev-parse", "HEAD").decode("ascii").strip()
+        with self.assertRaisesRegex(PolicyError, "unsupported clone metadata: shallow"):
+            trusted.check(shallow, shallow_base, verify)
 
     def test_02_trusted_check_reports_dirty_tree_and_subprocess_denial_hints(self):
         repo = self.root / "subproc-repo"

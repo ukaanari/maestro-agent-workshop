@@ -69,6 +69,10 @@ fake `review`, `diff`, exact-hash `approve` (via the explicit `test_context=True
 
 ## 4. Known dogfooding boundaries
 
+* **Full (non-shallow) Git clones are required.** MAESTRO's `clone_config()` intentionally
+  rejects `.git/shallow` metadata (`unsupported clone metadata: shallow`). If you checked out
+  a repository with `--depth 1` (for example in CI), unshallow it first (`git fetch --unshallow`)
+  before running `trusted check` or `trusted start`.
 * **Leave the source repository untouched** while a Trusted Local task is open. Source-guard
   checks compare HEAD, refs, stash, index, and working-tree status before and after every phase.
 * **Subprocess-heavy test suites** (such as MAESTRO's own `test_sandbox.py` or
