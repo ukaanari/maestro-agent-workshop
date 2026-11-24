@@ -15,8 +15,8 @@ in .git/info (which Git never commits).
   privacy_scan.py install [--force]  install the pre-commit and pre-push hooks
 
 Exit status: 0 clean, 1 findings, 2 error. A line containing `privacy-scan: allow`
-is not checked by the secret and identifier rules; such lines are reviewed like any
-change. Private terms are checked on every line: the marker cannot suppress them.
+skips heuristic rules (home paths, emails, generic assignments) for reviewed public
+examples; private terms and high-confidence credential formats are NEVER suppressible.
 Hooks are bypassed by `git commit --no-verify` and `git push --no-verify`, and CI
 runs only after a push: it cannot un-publish a secret. See CONTRIBUTING.md.
 """
@@ -51,7 +51,9 @@ UNQUOTED_ASSIGNMENT = re.compile(
     r"([A-Za-z0-9/+_=-]{24,})(?=\s|$|[;,)\]}])"
 )
 BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9/+_=.-]{24,})(?=\s|$|['\"`,;)\]}])")
-PLACEHOLDER = re.compile(r"(?i)example|sample|sentinel|canary|synthetic|dummy|fake|placeholder|redacted|changeme|your|xxxx|test")
+PLACEHOLDER_WORD = re.compile(
+    r"(?i)(?:^|[^A-Za-z0-9])(example|sample|sentinel|canary|synthetic|dummy|fake|placeholder|redacted|changeme|your|xxxx|test)(?:$|[^A-Za-z0-9])"
+)
 HOME_PATH = re.compile(
     r"(?<![\w.$])/(?:Users|home)/([A-Za-z0-9._-]+)(?=/|\s|$|['\"`:;,)\]}])"
     r"|\b[A-Za-z]:\\\\?Users\\\\?([A-Za-z0-9._-]+)(?=\\\\|\\|/|\s|$|['\"`:;,)\]}])"
@@ -138,43 +140,77 @@ def email_allowed(address, domain):
     return address.lower() in EMAIL_ADDRESSES or EMAIL_DOMAINS.search(domain) is not None
 
 
-def _mixed_secret_value(value):
-    classes = (
+def _has_mixed_classes(value):
+    return (
         any("a" <= c <= "z" for c in value)
         + any("A" <= c <= "Z" for c in value)
         + any("0" <= c <= "9" for c in value)
-    )
+    ) >= 2
+
+
+def is_placeholder(value):
+    """True only for delimited placeholder strings without high-entropy secret segments."""
+    if not PLACEHOLDER_WORD.search(value):
+        return False
+    for segment in re.split(r"[^A-Za-z0-9]+", value):
+        if (len(segment) >= 16 and _has_mixed_classes(segment) and
+                not re.fullmatch(r"[0-9a-fA-F]+", segment) and entropy(segment) >= 3.5):
+            return False
+    return True
+
+
+def _mixed_secret_value(value):
     return (
-        classes >= 2
+        _has_mixed_classes(value)
         and not value.startswith("/")
         and not re.fullmatch(r"[0-9a-fA-F]+", value)
-        and not PLACEHOLDER.search(value)
+        and not is_placeholder(value)
         and entropy(value) >= 3.5
     )
+
+
+def scan_path(path, terms):
+    """Return list of rule names if sensitive values appear inside a repository file path."""
+    rules = []
+    normalized = re.sub(r"[-_/.]+", " ", path)
+    for index, term in enumerate(terms, 1):
+        if term.search(path) or term.search(normalized):
+            rules.append("private-term-%d" % index)
+    for rule, pattern in SECRETS:
+        if pattern.search(path):
+            rules.append(rule)
+    for candidate in (path, "/" + path.lstrip("/")):
+        for m in HOME_PATH.finditer(candidate):
+            if (m.group(1) or m.group(2)) not in HOME_ALLOWED:
+                rules.append("home-path")
+    for m in EMAIL.finditer(path):
+        if not email_allowed(m.group(0), m.group(1)):
+            rules.append("personal-email")
+    return list(dict.fromkeys(rules))
 
 
 def scan_text(text, terms):
     """(rule, line, length) for each finding. Values are measured, never returned."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
-        # Private terms come first and are never suppressible: the allow marker exists for
-        # deliberate public examples, and a private term is never one.
+        # Private terms and high-confidence credential formats are NEVER suppressible
+        # by `privacy-scan: allow`.
         for index, term in enumerate(terms, 1):
             if term.search(line):
                 found.append(("private-term-%d" % index, number, 0))
-        if ALLOW_MARKER in line:
-            continue
         for rule, pattern in SECRETS:
             found += [(rule, number, len(m.group(0))) for m in pattern.finditer(line)]
+        if ALLOW_MARKER in line:
+            continue
         for m in URL_CREDENTIALS.finditer(line):
             # No host is exempt: a real password for a local database is still a credential.
-            if not PLACEHOLDER.search(m.group(1)):
+            if not is_placeholder(m.group(1)):
                 found.append(("url-credentials", number, len(m.group(1))))
         specific_secret = any(r in ("github-token", "jwt", "slack-token") or r.endswith("-key")
                               for r, n, _ in found if n == number)
         for m in ASSIGNMENT.finditer(line):
             value = m.group(1)
-            if (not re.fullmatch(r"[0-9a-fA-F]+", value) and not PLACEHOLDER.search(value) and
+            if (not re.fullmatch(r"[0-9a-fA-F]+", value) and not is_placeholder(value) and
                     entropy(value) >= 3.5 and not specific_secret):
                 found.append(("secret-assignment", number, len(value)))
         for m in UNQUOTED_ASSIGNMENT.finditer(line):
@@ -208,13 +244,17 @@ class Report:
         self.findings, self.terms, self.seen = [], private_terms(), set()
 
     def file(self, where, path, body):
+        path_hits = scan_path(path, self.terms)
+        display_path = "<redacted-path>" if path_hits else path
+        for rule in path_hits:
+            self.add(rule, where + display_path, "sensitive value in path; path hidden")
         hit = forbidden(path)
         if hit:
-            self.add(hit[0], where + path, hit[1])
+            self.add(hit[0], where + display_path, hit[1])
         if b"\0" in body[:8192]:
             return  # binary: the path rules above still apply
         for rule, line, length in scan_text(body.decode("utf-8", "replace"), self.terms):
-            self.add(rule, "%s%s:%d" % (where, path, line), "%d chars, value hidden" % length if length else "value hidden")
+            self.add(rule, "%s%s:%d" % (where, display_path, line), "%d chars, value hidden" % length if length else "value hidden")
 
     def add(self, rule, location, note):
         if (rule, location) not in self.seen:
@@ -230,10 +270,11 @@ class Report:
                 if address and not email_allowed(address, domain):
                     self.add("personal-email-identity", "commit %s %s" % (short, role),
                              "use your GitHub noreply address (git config user.email)")
-                identity = "%s %s" % (name, address)
                 for index, term in enumerate(self.terms, 1):
-                    if term.search(identity):
+                    if term.search(address):
                         self.add("private-term-%d" % index, "commit %s %s" % (short, role), "value hidden")
+                for rule, _, _ in scan_text(name, self.terms):
+                    self.add(rule, "commit %s %s" % (short, role), "value hidden")
             for rule, line, length in scan_text(meta[4], self.terms):
                 self.add(rule, "commit %s message:%d" % (short, line), "value hidden")
             changed = []
@@ -255,7 +296,8 @@ class Report:
         for rule, location, note in self.findings:
             print("  %-24s %s  (%s)" % (rule, location, note), file=sys.stderr)
         print("Fix: remove the value and rotate it if it was ever pushed, untrack the path, or for a deliberate\n"
-              "public example add '%s' to that line. Bypassing the hook does not make a value safe."
+              "public example of a heuristic rule add '%s' to that line (private terms and high-confidence\n"
+              "secrets are never suppressible). Bypassing the hook does not make a value safe."
               % ALLOW_MARKER, file=sys.stderr)
         return 1
 
