@@ -436,6 +436,30 @@ def counted(summary):
     return summary
 
 
+def _check_hints(baseline, source_clean):
+    """Actionable offline hints for common trusted check baseline issues."""
+    hints = []
+    if not source_clean:
+        hints.append("Source repository has uncommitted changes; commit or stash them before trusted start "
+                     "and leave the repository untouched while a task is open.")
+    if baseline.get("passed"):
+        return hints
+    text = (baseline.get("excerpt") or "") + "\n" + (baseline.get("reason") or "")
+    if "MAESTRO: no tests ran" in text:
+        hints.append("No tests were discovered. Adjust --test-dir, --test-pattern, or --top-level-dir.")
+    elif "MAESTRO: no test executed" in text:
+        hints.append("Every discovered test was skipped; Trusted Local requires at least one executed test.")
+    if "subprocess.py" in text or "Popen" in text or "os.fork" in text:
+        hints.append("Confined verification denies subprocesses and fork(); target a pure in-process unittest "
+                     "subset with --test-pattern.")
+    if "ModuleNotFoundError" in text or "ImportError" in text:
+        hints.append("Import failed inside confined verification; pass --pythonpath DIR or --top-level-dir ., "
+                     "or note that third-party packages outside the repository are unavailable.")
+    if "socket.py" in text or "urllib" in text:
+        hints.append("Confined verification denies all network access.")
+    return hints
+
+
 def check(repo, base, verify=None):
     """Read-only compatibility check: no task, state, agent or model.
 
@@ -452,6 +476,7 @@ def check(repo, base, verify=None):
     with tempfile.TemporaryDirectory(prefix="maestro-check-") as temp:
         home = Path(os.path.realpath(temp))
         before = source_guard(repo, home)
+        source_clean = not bool(before.get("status"))
         clone = home / "clone"
         git(home, home, "clone", "--no-hardlinks", "--no-checkout", "--template=", str(repo), str(clone))
         git(clone, home, "checkout", "--detach", base)
@@ -461,7 +486,8 @@ def check(repo, base, verify=None):
         verification_dirs(snap, verify)
         report = {"compatible": False, "repo": str(repo), "base": base, "snapshot_sha256": snap["sha256"],
                   "files": sum(e["type"] == "file" for e in snap["manifest"].values()),
-                  "ignored_paths": len(snap["ignored"]), "verify": verify, "command": command}
+                  "ignored_paths": len(snap["ignored"]), "source_clean": source_clean,
+                  "verify": verify, "command": command}
         output = None
         try:
             output = confined_verify(home, materialize(clone, home, snap, home / "verify"), command)
@@ -477,6 +503,9 @@ def check(repo, base, verify=None):
                 counted(report["baseline"]["summary"])
             except PolicyError as exc:
                 report["baseline"].update(passed=False, reason=str(exc))
+        hints = _check_hints(report["baseline"], source_clean)
+        if hints:
+            report["hints"] = hints
         if source_guard(repo, home) != before:
             raise IntegrityError("source repository guard changed during check")
     report["compatible"] = True
