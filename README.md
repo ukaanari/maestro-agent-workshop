@@ -212,8 +212,10 @@ A separately authorized real Codex run uses the same commands without `--codex-b
 
 `status` lists the changed files and the `next` suggested commands, and `diff` prints the
 exact tree-to-tree patch under review, without changing task state. Instead of approving, a human can run
-`trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
-or `trusted cancel TASK_ID`. Both permanently block approval and export.
+`trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`),
+`trusted cancel TASK_ID` (immediately terminal on resting states, or signals a running owner),
+or `trusted recover TASK_ID` (marks an abandoned mid-phase task `interrupted` without restarting agents).
+All permanently block approval and export.
 
 `--codex-bin` or `MAESTRO_CODEX_BIN` explicitly chooses a binary. Without either, the
 production path looks for `codex` and never substitutes the fake. A live run requires

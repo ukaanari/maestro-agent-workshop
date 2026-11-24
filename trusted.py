@@ -1153,9 +1153,56 @@ class TrustedEngine:
         return self.store.get(task_id)
 
     def cancel(self, task_id):
-        # A running owner polls this flag; a task awaiting approval ends immediately.
+        """Cancel a trusted-local task.
+
+        When no owner holds executor.lock, resting active states (preparing/reviewing)
+        and created/awaiting_approval transition immediately to terminal cancelled.
+        When an owner is actively running, sets the cancel flag for the owner to poll.
+        """
         self.require(task_id)
-        self.store.cancel(task_id)
+        try:
+            with self.store.lock(task_id):
+                task = self.require(task_id)
+                old = task["status"]
+                if old == "cancelled":
+                    return task
+                if old not in ACTIVE | {"created", "awaiting_approval"}:
+                    raise PolicyError("cannot cancel a terminal task")
+                with self.store.connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+                    cur = row["status"]
+                    if cur == "cancelled":
+                        return self.store.get(task_id)
+                    if cur not in ACTIVE | {"created", "awaiting_approval"}:
+                        raise PolicyError("cannot cancel a terminal task")
+                    conn.execute("UPDATE tasks SET cancel=1,status='cancelled' WHERE id=?", (task_id,))
+                    self.store.log(conn, task_id, "cancelled", "Cancellation requested by operator")
+                return self.store.get(task_id)
+        except PolicyError as exc:
+            if str(exc) != "task already has an active owner":
+                raise
+            self.store.cancel(task_id)
+            return self.store.get(task_id)
+
+    def recover(self, task_id):
+        """Mark an abandoned mid-phase trusted-local task interrupted without restarting agents.
+
+        Normal resting states (preparing with clone_ready, reviewing, awaiting_approval)
+        and tasks with an active lock owner are refused.
+        """
+        self.require(task_id)
+        with self.store.lock(task_id):
+            task = self.require(task_id)
+            status = task["status"]
+            abandoned = (
+                status in ("created", "implementing", "verifying")
+                or (status == "preparing" and not self.store.has_artifact(task_id, "clone_ready"))
+            )
+            if not abandoned:
+                raise PolicyError("only an abandoned active task can be recovered")
+            Engine(self.store)._finish(task_id, "interrupted",
+                                       "Owner absent; marked interrupted without restarting agents")
         return self.store.get(task_id)
 
     def status(self, task_id):
