@@ -46,8 +46,16 @@ SECRETS = [
 URL_CREDENTIALS = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@'\"<>]+:([^\s/@'\"<>]+)@([^\s/:'\"<>?#]+)")
 ASSIGNMENT = re.compile(r"(?i)\b[\w.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|credential)[\w.-]*\b['\"]?\s*[:=]\s*"
                         r"['\"]([A-Za-z0-9/+_=.-]{24,})['\"]")
+UNQUOTED_ASSIGNMENT = re.compile(
+    r"(?i)\b[\w.-]*(?:api[_-]?key|secret|token|passw(?:or)?d|credential)[\w.-]*\b\s*[:=]\s*"
+    r"([A-Za-z0-9/+_=-]{24,})(?=\s|$|[;,)\]}])"
+)
+BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9/+_=.-]{24,})(?=\s|$|['\"`,;)\]}])")
 PLACEHOLDER = re.compile(r"(?i)example|sample|sentinel|canary|synthetic|dummy|fake|placeholder|redacted|changeme|your|xxxx|test")
-HOME_PATH = re.compile(r"(?<![\w.$])/(?:Users|home)/([A-Za-z0-9._-]+)/|\b[A-Za-z]:\\\\?Users\\\\?([A-Za-z0-9._-]+)")
+HOME_PATH = re.compile(
+    r"(?<![\w.$])/(?:Users|home)/([A-Za-z0-9._-]+)(?=/|\s|$|['\"`:;,)\]}])"
+    r"|\b[A-Za-z]:\\\\?Users\\\\?([A-Za-z0-9._-]+)(?=\\\\|\\|/|\s|$|['\"`:;,)\]}])"
+)
 HOME_ALLOWED = {"runner", "you", "me", "user", "username", "name", "example", "shared", "someone", "jdoe"}
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
 EMAIL_DOMAINS = re.compile(r"(?i)(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost|"
@@ -60,10 +68,11 @@ EMAIL_ADDRESSES = {"noreply@anthropic.com", "noreply@github.com", "git@github.co
 FORBIDDEN = [
     ("env-file", re.compile(r"(^|/)\.env(\.[^/]*)?$"),
      "environment files hold secrets; commit a .env.example with placeholder values"),
-    ("private-key-file", re.compile(r"(^|/)(id_(?:rsa|dsa|ecdsa|ed25519)(?!\.pub$)[^/]*|[^/]*\.(?:pem|key|p12|pfx|ppk|jks|keystore))$"),
+    ("private-key-file", re.compile(r"(^|/)(id_(?:rsa|dsa|ecdsa|ed25519)(?!\.pub$)[^/]*|[^/]*\.(?:pem|key|p8|p12|pfx|ppk|jks|keystore))$"),
      "private keys and certificates belong in a secret store"),
     ("credential-file", re.compile(r"(^|/)(\.netrc|\.pypirc|\.npmrc|\.git-credentials|\.?credentials\.json|auth\.json|"
-                                   r"token\.json|service[-_]account[^/]*\.json)$"),
+                                   r"token\.json|service[-_]account[^/]*\.json|\.aws/credentials|\.kube/config|"
+                                   r"\.docker/config\.json)$"),
      "credential files must stay local"),
     ("database", re.compile(r"\.(?:sqlite3?|db)(?:-journal|-wal|-shm)?$|(^|/)(?:MAESTRO-P0|executor\.lock)$"),
      "MAESTRO state and databases contain local paths and evidence"),
@@ -72,7 +81,7 @@ FORBIDDEN = [
     ("agent-transcript", re.compile(r"\.jsonl$|(^|/)\.(?:claude|codex)/|(^|/)last-message\.txt$"),
      "agent transcripts and session data stay local"),
     ("log-file", re.compile(r"\.log$"), "logs can contain paths, prompts and tokens"),
-    ("test-temp", re.compile(r"(^|/)\.(?:trusted|review|usability|scoped|project-demo|trusted-demo)-[^/]*/"),
+    ("test-temp", re.compile(r"(^|/)\.(?:trusted|review|usability|scoped|project-demo|trusted-demo|report|reliability|dogfood)-[^/]*/"),
      "temporary test and demo directories"),
     ("os-metadata", re.compile(r"(^|/)\.DS_Store$"), "Finder metadata lists local file names"),
 ]
@@ -129,6 +138,21 @@ def email_allowed(address, domain):
     return address.lower() in EMAIL_ADDRESSES or EMAIL_DOMAINS.search(domain) is not None
 
 
+def _mixed_secret_value(value):
+    classes = (
+        any("a" <= c <= "z" for c in value)
+        + any("A" <= c <= "Z" for c in value)
+        + any("0" <= c <= "9" for c in value)
+    )
+    return (
+        classes >= 2
+        and not value.startswith("/")
+        and not re.fullmatch(r"[0-9a-fA-F]+", value)
+        and not PLACEHOLDER.search(value)
+        and entropy(value) >= 3.5
+    )
+
+
 def scan_text(text, terms):
     """(rule, line, length) for each finding. Values are measured, never returned."""
     found = []
@@ -146,11 +170,21 @@ def scan_text(text, terms):
             # No host is exempt: a real password for a local database is still a credential.
             if not PLACEHOLDER.search(m.group(1)):
                 found.append(("url-credentials", number, len(m.group(1))))
+        specific_secret = any(r in ("github-token", "jwt", "slack-token") or r.endswith("-key")
+                              for r, n, _ in found if n == number)
         for m in ASSIGNMENT.finditer(line):
             value = m.group(1)
             if (not re.fullmatch(r"[0-9a-fA-F]+", value) and not PLACEHOLDER.search(value) and
-                    entropy(value) >= 3.5 and not any(r == "github-token" or r.endswith("-key") for r, n, _ in found if n == number)):
+                    entropy(value) >= 3.5 and not specific_secret):
                 found.append(("secret-assignment", number, len(value)))
+        for m in UNQUOTED_ASSIGNMENT.finditer(line):
+            value = m.group(1)
+            if _mixed_secret_value(value) and not specific_secret:
+                found.append(("secret-assignment", number, len(value)))
+        for m in BEARER_TOKEN.finditer(line):
+            value = m.group(1)
+            if _mixed_secret_value(value) and not specific_secret:
+                found.append(("bearer-token", number, len(value)))
         for m in HOME_PATH.finditer(line):
             if (m.group(1) or m.group(2)) not in HOME_ALLOWED:
                 found.append(("home-path", number, len(m.group(0))))
@@ -190,13 +224,17 @@ class Report:
     def commits(self, shas):
         for sha in shas:
             short = sha[:12]
-            meta = git("show", "-s", "--format=%ae%x00%ce%x00%B", sha).decode("utf-8", "replace").split("\0", 2)
-            for role, address in (("author", meta[0]), ("committer", meta[1])):
+            meta = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", sha).decode("utf-8", "replace").split("\0", 4)
+            for role, name, address in (("author", meta[0], meta[1]), ("committer", meta[2], meta[3])):
                 domain = address.rpartition("@")[2]
                 if address and not email_allowed(address, domain):
                     self.add("personal-email-identity", "commit %s %s" % (short, role),
                              "use your GitHub noreply address (git config user.email)")
-            for rule, line, length in scan_text(meta[2], self.terms):
+                identity = "%s %s" % (name, address)
+                for index, term in enumerate(self.terms, 1):
+                    if term.search(identity):
+                        self.add("private-term-%d" % index, "commit %s %s" % (short, role), "value hidden")
+            for rule, line, length in scan_text(meta[4], self.terms):
                 self.add(rule, "commit %s message:%d" % (short, line), "value hidden")
             changed = []
             raw = git("diff-tree", "--no-commit-id", "-r", "-z", "--root", "-m", "--no-renames",
