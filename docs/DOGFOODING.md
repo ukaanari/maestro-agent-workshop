@@ -7,8 +7,8 @@ credentials**.
 > [!NOTE]
 > Trusted Local Mode runs real Codex and Claude Code **unconfined**, with your normal user
 > permissions. Only verification runs inside macOS Seatbelt. Offline rehearsals use explicit
-> fake fixtures (`tests/fixtures/fake_codex.py`, `tests/fixtures/fake_claude.py`) and never
-> contact the network.
+> fake fixtures (`tests/fixtures/fake_codex.py`, `tests/fixtures/fake_claude.py`,
+> `examples/project-demo/fake_implementer.py`) and never contact the network.
 
 ## 1. Check host prerequisites (read-only)
 
@@ -26,7 +26,7 @@ MAESTRO's full test suite spawns `git`, `sandbox-exec`, or child Python processe
 denials — which is expected and proves confinement is active.
 
 To verify a pure in-process stdlib module inside MAESTRO itself, target a pure-Python test
-file with `--test-pattern`:
+file with `--test-pattern` (from a full, non-shallow Git clone):
 
 ```sh
 BASE=$(git rev-parse HEAD)
@@ -40,32 +40,49 @@ BASE=$(git rev-parse HEAD)
 Expected highlights in the JSON output:
 
 * `"compatible": true`
-* `"source_clean": true` (if you have uncommitted changes, `trusted check` reports
-  `"source_clean": false` and adds a hint to commit or stash them before `trusted start`)
+* `"source_clean": true` (`source_clean_scope: "working_tree_vs_source_head_excluding_gitignored"`):
+  reports whether the source working tree had staged, unstaged, or non-ignored untracked changes
+  relative to its current `HEAD` at check time. Gitignored files do not affect `source_clean`,
+  and `trusted check` always clones and verifies the pinned `--base` commit rather than
+  working-tree edits.
 * `"baseline": {"passed": true, "exit_code": 0, "summary": {"tests_run": 8, "executed": 8, ...}}`
 
-When a baseline fails, `trusted check` includes actionable `"hints"` for common causes:
+When the source tree is dirty or a baseline fails, `trusted check` may include heuristic
+`"hints"` alongside `"hints_note"`. These are **possible causes / observations** matched from
+truncated output and Git status — not definitive root-cause diagnoses — covering:
 
+* uncommitted or non-ignored untracked changes in the source working tree
 * zero tests discovered (`--test-dir`, `--test-pattern`, `--top-level-dir`)
-* all tests skipped (Trusted Local requires at least one executed test)
-* `subprocess` / `fork()` denial inside Seatbelt
-* missing imports (`--pythonpath`, `--top-level-dir`, or unavailable third-party packages)
-* network denial inside Seatbelt
-* uncommitted changes in the source repository
+* all discovered tests skipped (Trusted Local requires at least one executed test)
+* possible `subprocess` / `fork()` denial inside Seatbelt
+* possible missing imports (`--pythonpath`, `--top-level-dir`, or unavailable third-party packages)
+* possible network denial inside Seatbelt
 
-## 3. Rehearse the full Trusted Local flow offline
+## 3. Rehearse Trusted Local flows offline
 
-Before running any live agent on your repository, rehearse the end-to-end lifecycle with the
-bundled offline demos (temporary directories, automatically cleaned up):
+Before running any live agent on your repository, rehearse the CLI flows with the bundled
+offline demos (temporary directories, automatically cleaned up; approvals use the explicit
+test-only `tests/fixtures/trusted_test_cli.py` harness):
 
 ```sh
 /usr/bin/python3 -B examples/trusted-local/demo.py
 /usr/bin/python3 -B examples/project-demo/demo.py
 ```
 
-Both demos exercise `trusted check`, `start`, fake `implement`, Seatbelt-confined `verify`,
-fake `review`, `diff`, exact-hash `approve` (via the explicit `test_context=True` harness),
-`export`, and `git apply --check` on a fresh clone of the base commit.
+What each demo actually exercises:
+
+* `examples/trusted-local/demo.py`: minimal single-file Codex-only flow on the `calc.py` fixture
+  (`start → implement (fake_codex.py) → verify → approve → export → status`). It does **not**
+  run `trusted check`, `trusted review`, `trusted diff`, or `git apply --check`.
+* `examples/project-demo/demo.py`: multi-file `src/` layout flow on the `stockroom` fixture
+  (`trusted check → start (--review-model) → implement (fake_implementer.py) → verify →
+  review (fake_claude.py) → diff → status → approve → export`), plus a second deliberately flawed
+  task that confined verification rejects. It does **not** apply the exported patch with
+  `git apply --check`.
+* `tests/test_dogfooding.py`: verifies MAESTRO's own `test_check_suite.py` via a non-shallow
+  export of `HEAD`, confirms shallow clones are still rejected, tests `source_clean` and
+  heuristic hints, and runs an end-to-end offline scoped-review → `export` → `git apply --check`
+  workflow.
 
 ## 4. Known dogfooding boundaries
 

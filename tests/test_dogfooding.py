@@ -35,22 +35,23 @@ class CheckHintUnitTests(unittest.TestCase):
 
         dirty = trusted._check_hints({"passed": True}, False)
         self.assertEqual(len(dirty), 1)
-        self.assertIn("uncommitted changes", dirty[0])
+        self.assertTrue(dirty[0].startswith("Observation:"))
+        self.assertIn("uncommitted or non-ignored untracked changes", dirty[0])
 
         no_tests = trusted._check_hints({"passed": False, "excerpt": "MAESTRO: no tests ran"}, True)
-        self.assertTrue(any("--test-dir" in h for h in no_tests))
+        self.assertTrue(any(h.startswith("Possible cause:") and "--test-dir" in h for h in no_tests))
 
         all_skipped = trusted._check_hints({"passed": False, "excerpt": "MAESTRO: no test executed"}, True)
-        self.assertTrue(any("skipped" in h for h in all_skipped))
+        self.assertTrue(any(h.startswith("Possible cause:") and "skipped" in h for h in all_skipped))
 
         subproc = trusted._check_hints({"passed": False, "excerpt": "File subprocess.py Popen PermissionError"}, True)
-        self.assertTrue(any("subprocesses" in h for h in subproc))
+        self.assertTrue(any(h.startswith("Possible cause:") and "subprocess" in h for h in subproc))
 
         imp = trusted._check_hints({"passed": False, "excerpt": "ModuleNotFoundError: No module named 'pkg'"}, True)
-        self.assertTrue(any("--pythonpath" in h for h in imp))
+        self.assertTrue(any(h.startswith("Possible cause:") and "--pythonpath" in h for h in imp))
 
         net = trusted._check_hints({"passed": False, "excerpt": "File socket.py PermissionError"}, True)
-        self.assertTrue(any("network" in h for h in net))
+        self.assertTrue(any(h.startswith("Possible cause:") and "network" in h for h in net))
 
 
 @RUNTIME
@@ -120,17 +121,29 @@ class DogfoodingIntegrationTests(unittest.TestCase):
         clean_report = trusted.check(repo, base)
         self.assertTrue(clean_report["compatible"])
         self.assertTrue(clean_report["source_clean"])
+        self.assertEqual(clean_report["source_clean_scope"], "working_tree_vs_source_head_excluding_gitignored")
         self.assertFalse(clean_report["baseline"]["passed"])  # calc.add is stubbed in base fixture
         self.assertNotIn("hints", clean_report)
 
-        # Dirty working tree is flagged without mutating or failing compatibility.
+        # Dirty working tree (non-ignored untracked file) is flagged without failing compatibility.
         (repo / "UNTRACKED_NOTE.txt").write_text("dirty\n")
         dirty_report = trusted.check(repo, base)
         self.assertFalse(dirty_report["source_clean"])
-        self.assertTrue(any("uncommitted changes" in h for h in dirty_report.get("hints", [])))
+        self.assertTrue(any("uncommitted or non-ignored untracked changes" in h for h in dirty_report.get("hints", [])))
+        self.assertIn("not a definitive diagnosis", dirty_report.get("hints_note", ""))
         (repo / "UNTRACKED_NOTE.txt").unlink()
 
-        # Commit a test that invokes subprocess.run -> Seatbelt denies it and hints explain why.
+        # Commit a .gitignore and verify gitignored files leave source_clean=True.
+        (repo / ".gitignore").write_text("ignored.tmp\n")
+        self.git(repo, "add", ".gitignore")
+        self.git(repo, "commit", "-q", "-m", "add gitignore")
+        ignored_base = self.git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        (repo / "ignored.tmp").write_text("ignored scratch\n")
+        ignored_report = trusted.check(repo, ignored_base)
+        self.assertTrue(ignored_report["source_clean"])
+        (repo / "ignored.tmp").unlink()
+
+        # Commit a test that invokes subprocess.run -> Seatbelt denies it and hints note possible cause.
         (repo / "tests" / "test_subproc.py").write_text(
             "import subprocess, unittest\n"
             "class SubprocTest(unittest.TestCase):\n"
@@ -146,15 +159,18 @@ class DogfoodingIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(subproc_report["compatible"])
         self.assertFalse(subproc_report["baseline"]["passed"])
-        self.assertTrue(any("subprocesses" in h for h in subproc_report.get("hints", [])), subproc_report)
+        self.assertTrue(any(h.startswith("Possible cause:") and "subprocess" in h
+                            for h in subproc_report.get("hints", [])), subproc_report)
+        self.assertIn("not a definitive diagnosis", subproc_report.get("hints_note", ""))
 
-        # Unmatched pattern triggers zero-tests hint.
+        # Unmatched pattern triggers zero-tests possible-cause hint.
         empty_report = trusted.check(
             repo, subproc_base, trusted.verify_config(test_dir="tests", pattern="test_nonexistent_*.py"),
         )
         self.assertTrue(empty_report["compatible"])
         self.assertFalse(empty_report["baseline"]["passed"])
-        self.assertTrue(any("--test-dir" in h for h in empty_report.get("hints", [])), empty_report)
+        self.assertTrue(any(h.startswith("Possible cause:") and "--test-dir" in h
+                            for h in empty_report.get("hints", [])), empty_report)
 
     def test_03_offline_end_to_end_dogfooding_workflow_produces_applicable_patch(self):
         repo = self.root / "workflow-repo"

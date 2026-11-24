@@ -437,26 +437,33 @@ def counted(summary):
 
 
 def _check_hints(baseline, source_clean):
-    """Actionable offline hints for common trusted check baseline issues."""
+    """Heuristic, non-authoritative possible causes matched from truncated check output."""
     hints = []
     if not source_clean:
-        hints.append("Source repository has uncommitted changes; commit or stash them before trusted start "
-                     "and leave the repository untouched while a task is open.")
+        hints.append("Observation: the source repository working tree has uncommitted or non-ignored "
+                     "untracked changes relative to its current HEAD (trusted check cloned --base, not "
+                     "working-tree edits). Commit or stash changes before trusted start and leave the "
+                     "source repository untouched while a task is open.")
     if baseline.get("passed"):
         return hints
     text = (baseline.get("excerpt") or "") + "\n" + (baseline.get("reason") or "")
     if "MAESTRO: no tests ran" in text:
-        hints.append("No tests were discovered. Adjust --test-dir, --test-pattern, or --top-level-dir.")
+        hints.append("Possible cause: no tests were discovered under the configured layout. "
+                     "Check --test-dir, --test-pattern, or --top-level-dir.")
     elif "MAESTRO: no test executed" in text:
-        hints.append("Every discovered test was skipped; Trusted Local requires at least one executed test.")
+        hints.append("Possible cause: every discovered test was skipped; Trusted Local verification "
+                     "requires at least one executed test.")
     if "subprocess.py" in text or "Popen" in text or "os.fork" in text:
-        hints.append("Confined verification denies subprocesses and fork(); target a pure in-process unittest "
-                     "subset with --test-pattern.")
+        hints.append("Possible cause: a test may have attempted subprocess or fork execution, which "
+                     "confined verification denies. Confirm locally or target a pure in-process "
+                     "unittest subset with --test-pattern.")
     if "ModuleNotFoundError" in text or "ImportError" in text:
-        hints.append("Import failed inside confined verification; pass --pythonpath DIR or --top-level-dir ., "
-                     "or note that third-party packages outside the repository are unavailable.")
+        hints.append("Possible cause: an import may have failed inside confined verification. "
+                     "Check --pythonpath / --top-level-dir, or whether the test depends on packages "
+                     "not available inside the repository.")
     if "socket.py" in text or "urllib" in text:
-        hints.append("Confined verification denies all network access.")
+        hints.append("Possible cause: a test may have attempted network access, which confined "
+                     "verification denies.")
     return hints
 
 
@@ -466,6 +473,9 @@ def check(repo, base, verify=None):
     Clones the base into a private temporary directory, captures the snapshot a task
     would bind and runs the configured verification on it under Seatbelt. Before an
     implementation a failing baseline can be expected; a snapshot or setup error cannot.
+    `source_clean` reports whether the source working tree had no staged, unstaged, or
+    non-ignored untracked changes relative to its current HEAD at check time (gitignored
+    files are excluded, and verification always runs against the pinned `base` commit).
     """
     command = verification_command(verify)
     if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
@@ -487,6 +497,7 @@ def check(repo, base, verify=None):
         report = {"compatible": False, "repo": str(repo), "base": base, "snapshot_sha256": snap["sha256"],
                   "files": sum(e["type"] == "file" for e in snap["manifest"].values()),
                   "ignored_paths": len(snap["ignored"]), "source_clean": source_clean,
+                  "source_clean_scope": "working_tree_vs_source_head_excluding_gitignored",
                   "verify": verify, "command": command}
         output = None
         try:
@@ -506,6 +517,10 @@ def check(repo, base, verify=None):
         hints = _check_hints(report["baseline"], source_clean)
         if hints:
             report["hints"] = hints
+            report["hints_note"] = (
+                "Heuristic observations/possible causes matched from truncated output and source status; "
+                "not a definitive diagnosis."
+            )
         if source_guard(repo, home) != before:
             raise IntegrityError("source repository guard changed during check")
     report["compatible"] = True
