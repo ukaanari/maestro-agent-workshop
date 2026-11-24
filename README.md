@@ -213,9 +213,10 @@ A separately authorized real Codex run uses the same commands without `--codex-b
 `status` lists the changed files and the `next` suggested commands, and `diff` prints the
 exact tree-to-tree patch under review, without changing task state. `trusted list [--status STATUS]`
 and `trusted report TASK_ID [--format json|markdown] [--no-live-check]` inspect existing
-Trusted Local records strictly read-only (SQLite read-only URI, never creating a state root
-or mutating task status), summarizing evidence integrity, verification counts, independent
-review findings, approval/export records and next steps. Instead of approving, a human can run
+Trusted Local records strictly read-only (single-transaction SQLite `?mode=ro` snapshot, zero
+writes to clones, Git object stores, indexes, or state directories), mirror real approval/export
+gate preconditions read-only, escape untrusted fields in Markdown output, and omit `approve`/`export`
+suggestions whenever evidence is missing, invalid, or drifted. Instead of approving, a human can run
 `trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
 or `trusted cancel TASK_ID`. Both permanently block approval and export.
 
