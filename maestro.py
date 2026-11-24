@@ -72,6 +72,13 @@ def main(argv=None, *, test_context=False):
     check.add_argument("--repo", type=Path, required=True)
     check.add_argument("--base", required=True)
     add_verify_options(check)
+    tlist = commands.add_parser("list", help="read-only list of trusted-local tasks; creates no state root")
+    tlist.add_argument("--status", help="filter by task status")
+    treport = commands.add_parser("report", help="read-only JSON or Markdown report for one trusted-local task")
+    treport.add_argument("task_id")
+    treport.add_argument("--format", choices=("json", "markdown"), default="json")
+    treport.add_argument("--no-live-check", action="store_true",
+                         help="skip live clone and source-repository guard checks")
     for name in ("implement", "verify", "review", "diff", "approve", "reject", "cancel", "export", "status"):
         cmd = commands.add_parser(name)
         cmd.add_argument("task_id")
@@ -100,6 +107,20 @@ def main(argv=None, *, test_context=False):
             # Like doctor: a compatibility check never creates or adopts a state root.
             from trusted import check
             print(json.dumps(check(args.repo, args.base, verify_options(args)), indent=2, ensure_ascii=True))
+            return 0
+        if args.command == "trusted" and args.trusted_command == "list":
+            # Read-only listing: never creates or adopts a state root.
+            from report import list_trusted_tasks
+            print(json.dumps(list_trusted_tasks(args.root, status=args.status), indent=2, ensure_ascii=True))
+            return 0
+        if args.command == "trusted" and args.trusted_command == "report":
+            # Read-only report: opens SQLite read-only and never creates a state root.
+            from report import build_trusted_report, render_markdown
+            dossier = build_trusted_report(args.root, args.task_id, check_live=not args.no_live_check)
+            if args.format == "markdown":
+                sys.stdout.write(render_markdown(dossier))
+            else:
+                print(json.dumps(dossier, indent=2, ensure_ascii=True))
             return 0
         store = Store(args.root)
         engine = Engine(store)
