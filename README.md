@@ -216,9 +216,11 @@ and `trusted report TASK_ID [--format json|markdown] [--no-live-check]` inspect 
 Trusted Local records strictly read-only (single-transaction SQLite `?mode=ro` snapshot, zero
 writes to clones, Git object stores, indexes, or state directories), mirror real approval/export
 gate preconditions read-only, escape untrusted fields in Markdown output, and omit `approve`/`export`
-suggestions whenever evidence is missing, invalid, or drifted. Instead of approving, a human can run
-`trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
-or `trusted cancel TASK_ID`. Both permanently block approval and export.
+suggestions whenever evidence is missing, invalid, unverified, or drifted. Instead of approving, a human can run
+`trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`),
+`trusted cancel TASK_ID` (immediately terminal on resting states, or signals a running owner),
+or `trusted recover TASK_ID` (marks an abandoned mid-phase task or partial review `interrupted`, or
+invalidates a partial export, without restarting agents). All permanently block approval and export.
 
 `--codex-bin` or `MAESTRO_CODEX_BIN` explicitly chooses a binary. Without either, the
 production path looks for `codex` and never substitutes the fake. A live run requires
