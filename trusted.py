@@ -5,6 +5,7 @@ manifest, source guards and independent verification bind human approval.
 Process-group cleanup does not contain escaped descendants (issue #2).
 """
 from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import math
@@ -436,12 +437,46 @@ def counted(summary):
     return summary
 
 
+def _check_hints(baseline, source_clean):
+    """Heuristic, non-authoritative possible causes matched from truncated check output."""
+    hints = []
+    if not source_clean:
+        hints.append("Observation: the source repository working tree has uncommitted or non-ignored "
+                     "untracked changes relative to its current HEAD (trusted check cloned --base, not "
+                     "working-tree edits). Commit or stash changes before trusted start and leave the "
+                     "source repository untouched while a task is open.")
+    if baseline.get("passed"):
+        return hints
+    text = (baseline.get("excerpt") or "") + "\n" + (baseline.get("reason") or "")
+    if "MAESTRO: no tests ran" in text:
+        hints.append("Possible cause: no tests were discovered under the configured layout. "
+                     "Check --test-dir, --test-pattern, or --top-level-dir.")
+    elif "MAESTRO: no test executed" in text:
+        hints.append("Possible cause: every discovered test was skipped; Trusted Local verification "
+                     "requires at least one executed test.")
+    if "subprocess.py" in text or "Popen" in text or "os.fork" in text:
+        hints.append("Possible cause: a test may have attempted subprocess or fork execution, which "
+                     "confined verification denies. Confirm locally or target a pure in-process "
+                     "unittest subset with --test-pattern.")
+    if "ModuleNotFoundError" in text or "ImportError" in text:
+        hints.append("Possible cause: an import may have failed inside confined verification. "
+                     "Check --pythonpath / --top-level-dir, or whether the test depends on packages "
+                     "not available inside the repository.")
+    if "socket.py" in text or "urllib" in text:
+        hints.append("Possible cause: a test may have attempted network access, which confined "
+                     "verification denies.")
+    return hints
+
+
 def check(repo, base, verify=None):
     """Read-only compatibility check: no task, state, agent or model.
 
     Clones the base into a private temporary directory, captures the snapshot a task
     would bind and runs the configured verification on it under Seatbelt. Before an
     implementation a failing baseline can be expected; a snapshot or setup error cannot.
+    `source_clean` reports whether the source working tree had no staged, unstaged, or
+    non-ignored untracked changes relative to its current HEAD at check time (gitignored
+    files are excluded, and verification always runs against the pinned `base` commit).
     """
     command = verification_command(verify)
     if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
@@ -452,6 +487,7 @@ def check(repo, base, verify=None):
     with tempfile.TemporaryDirectory(prefix="maestro-check-") as temp:
         home = Path(os.path.realpath(temp))
         before = source_guard(repo, home)
+        source_clean = not bool(before.get("status"))
         clone = home / "clone"
         git(home, home, "clone", "--no-hardlinks", "--no-checkout", "--template=", str(repo), str(clone))
         git(clone, home, "checkout", "--detach", base)
@@ -461,7 +497,9 @@ def check(repo, base, verify=None):
         verification_dirs(snap, verify)
         report = {"compatible": False, "repo": str(repo), "base": base, "snapshot_sha256": snap["sha256"],
                   "files": sum(e["type"] == "file" for e in snap["manifest"].values()),
-                  "ignored_paths": len(snap["ignored"]), "verify": verify, "command": command}
+                  "ignored_paths": len(snap["ignored"]), "source_clean": source_clean,
+                  "source_clean_scope": "working_tree_vs_source_head_excluding_gitignored",
+                  "verify": verify, "command": command}
         output = None
         try:
             output = confined_verify(home, materialize(clone, home, snap, home / "verify"), command)
@@ -477,6 +515,13 @@ def check(repo, base, verify=None):
                 counted(report["baseline"]["summary"])
             except PolicyError as exc:
                 report["baseline"].update(passed=False, reason=str(exc))
+        hints = _check_hints(report["baseline"], source_clean)
+        if hints:
+            report["hints"] = hints
+            report["hints_note"] = (
+                "Heuristic observations/possible causes matched from truncated output and source status; "
+                "not a definitive diagnosis."
+            )
         if source_guard(repo, home) != before:
             raise IntegrityError("source repository guard changed during check")
     report["compatible"] = True
@@ -576,6 +621,21 @@ def claims(task):
     return result
 
 
+@contextmanager
+def _lock_dir(home):
+    """Acquire non-blocking exclusive executor.lock inside task directory before DB row creation."""
+    path = directory(home) / "executor.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PolicyError("task already has an active owner") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
 class TrustedEngine:
     def __init__(self, store, *, test_context=False):
         # Explicit in-process test capability. Never inferred from env, paths,
@@ -652,11 +712,12 @@ class TrustedEngine:
         if home.exists() or home.is_symlink():
             raise PolicyError("task already started; no retry or partial-clone reuse: " + task_id)
         directory(home)
-        with self.store.connect() as conn:
-            conn.execute("INSERT INTO tasks(id,status,spec) VALUES(?,?,?)",
-                         (task_id, "created", canonical(spec).decode()))
-            self.store.log(conn, task_id, "created", NOTICE)
-        with self.store.lock(task_id):
+        # Hold executor.lock BEFORE inserting the task row so recover/cancel cannot race start().
+        with _lock_dir(home):
+            with self.store.connect() as conn:
+                conn.execute("INSERT INTO tasks(id,status,spec) VALUES(?,?,?)",
+                             (task_id, "created", canonical(spec).decode()))
+                self.store.log(conn, task_id, "created", NOTICE)
             try:
                 baseline = source_guard(repo, home)
                 self.store.artifact(task_id, "source_guard", baseline)
@@ -664,19 +725,26 @@ class TrustedEngine:
                 with self.guard(task_id, "start"):
                     partial, clone = home / "clone.partial", home / "clone"
                     git(home, home, "clone", "--no-hardlinks", "--no-checkout", "--template=",
-                        str(repo), str(partial), cancelled=cancelled)
-                    git(partial, home, "checkout", "--detach", base, cancelled=cancelled)
-                    git(partial, home, "remote", "remove", "origin", cancelled=cancelled)
-                    if cancelled():
+                        str(repo), str(partial), cancelled=lambda: cancelled() or self.store.cancelled(task_id))
+                    git(partial, home, "checkout", "--detach", base,
+                        cancelled=lambda: cancelled() or self.store.cancelled(task_id))
+                    git(partial, home, "remote", "remove", "origin",
+                        cancelled=lambda: cancelled() or self.store.cancelled(task_id))
+                    if cancelled() or self.store.cancelled(task_id):
                         raise Cancelled("cancelled before clone promotion")
                     clone_config(partial)
                     # Reject unsupported base content or a verification layout that cannot
                     # exist before publishing the clone, and before any agent runs.
                     verification_dirs(snapshot(partial, home, base), verify)
                     partial.rename(clone)
+                if self.store.cancelled(task_id):
+                    raise Cancelled("cancelled during start")
                 self.store.artifact(task_id, "clone_ready", {"base": base})
             except (Exception, KeyboardInterrupt) as exc:
-                self.finish(task_id, KeyboardInterrupt(str(exc)) if isinstance(exc, Cancelled) else exc)
+                if self.store.cancelled(task_id):
+                    self.finish(task_id, Cancelled(str(exc) or "cancelled during start"))
+                else:
+                    self.finish(task_id, KeyboardInterrupt(str(exc)) if isinstance(exc, Cancelled) else exc)
         return self.store.get(task_id)
 
     def implement(self, task_id, codex_bin=None, timeout=1200):
@@ -893,6 +961,9 @@ class TrustedEngine:
             task = self.require(task_id)
             if task["status"] != "awaiting_approval":
                 raise PolicyError("task is not awaiting approval")
+            if task["cancel"]:
+                self.store.transition(task_id, "cancelled", "Cancellation wins over approval")
+                raise Cancelled("task cancelled before approval")
             if snapshot_hash != task["evidence"].get("snapshot_sha256"):
                 raise PolicyError("approval must name the exact snapshot hash")
             context = self.approval_context(task_id)
@@ -901,15 +972,43 @@ class TrustedEngine:
                 with self.guard(task_id, "approve"):
                     snap = self.checked(task_id)
                     gate = self.review_gate(task_id, context, override_review, snap)
+                if self.store.cancelled(task_id):
+                    raise Cancelled("cancellation wins over approval")
                 approval = dict(gate, snapshot_sha256=snapshot_hash, founder=founder, execution_context=context)
-                evidence = dict(task["evidence"], approval_sha256=self.store.artifact(task_id, "approval", approval))
+                encoded_app = canonical(approval)
+                if len(encoded_app) > 262144:
+                    raise PolicyError("artifact limit exceeded")
+                app_hash = digest(approval)
                 message = "Human approved exact snapshot: " + founder
                 if "review_override" in gate:
                     message += "; blocking review findings overridden"
-                self.store.transition(task_id, "approved", message, evidence)
+                # Commit cancel check, approval artifact, and status transition atomically.
+                with self.store.connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT status, cancel, evidence FROM tasks WHERE id=?", (task_id,)).fetchone()
+                    if row["cancel"]:
+                        if row["status"] == "awaiting_approval":
+                            conn.execute("UPDATE tasks SET status='cancelled' WHERE id=?", (task_id,))
+                            self.store.log(conn, task_id, "cancelled", "Cancellation wins over approval")
+                        raise Cancelled("cancellation wins over approval")
+                    if row["status"] != "awaiting_approval":
+                        raise PolicyError("task is not awaiting approval")
+                    conn.execute("INSERT INTO artifacts VALUES(?,?,?,?)",
+                                 (task_id, "approval", encoded_app.decode(), app_hash))
+                    evidence = dict(json.loads(row["evidence"]), approval_sha256=app_hash)
+                    conn.execute("UPDATE tasks SET status='approved',evidence=? WHERE id=?",
+                                 (canonical(evidence).decode(), task_id))
+                    self.store.log(conn, task_id, "approved", message)
+            except Cancelled:
+                if self.store.get(task_id)["status"] == "awaiting_approval":
+                    self.store.transition(task_id, "cancelled", "Cancellation wins over approval")
+                raise
             except (Exception, KeyboardInterrupt) as exc:
                 if self.store.get(task_id)["status"] == "awaiting_approval":
-                    self.store.transition(task_id, "invalidated", "Approval refused: " + str(exc))
+                    if self.store.cancelled(task_id):
+                        self.store.transition(task_id, "cancelled", "Cancellation wins over approval")
+                    else:
+                        self.store.transition(task_id, "invalidated", "Approval refused: " + str(exc))
                 raise
         return self.store.get(task_id)
 
@@ -923,6 +1022,8 @@ class TrustedEngine:
             home = self.store.task_dir(task_id)
             if self.store.has_artifact(task_id, "export"):
                 raise PolicyError("patch already exported")
+            if os.path.lexists(home / "export.patch"):
+                raise PolicyError("partial export detected: export.patch exists without recorded export artifact")
             try:
                 with self.guard(task_id, "export"):
                     snap = self.checked(task_id)
@@ -966,6 +1067,9 @@ class TrustedEngine:
                 raise PolicyError("this task did not request a review (start it with --review-model)")
             if task["status"] != "awaiting_approval":
                 raise PolicyError("review requires a verified task awaiting approval")
+            if task["cancel"]:
+                self.store.transition(task_id, "cancelled", "Cancellation wins over review")
+                raise Cancelled("task cancelled before review")
             attempts = task["evidence"].get("review_attempts", 0)
             if attempts and self.store.artifact(task_id, "review.%d" % attempts).get("outcome") == "completed":
                 raise PolicyError("a completed review is final")
@@ -996,7 +1100,9 @@ class TrustedEngine:
             if record["outcome"] == "completed":
                 message += "; " + ("blocking findings" if record["blocking"] else "no blocking findings")
             self.annotate(task_id, dict(task["evidence"], review_attempts=attempt, review_sha256=sha), message)
-            if invalid and self.store.get(task_id)["status"] == "awaiting_approval":
+            if self.store.cancelled(task_id) and self.store.get(task_id)["status"] == "awaiting_approval":
+                self.store.transition(task_id, "cancelled", "Cancellation wins over review")
+            elif invalid and self.store.get(task_id)["status"] == "awaiting_approval":
                 self.store.transition(task_id, "invalidated", "Review refused: " + record["error"])
         return self.status(task_id)
 
@@ -1109,6 +1215,8 @@ class TrustedEngine:
 
     def next_steps(self, task):
         """Suggested commands for the current state: advice only, never executed."""
+        if task.get("cancel"):
+            return []
         tid, status = task["id"], task["status"]
         approve = "trusted approve %s --snapshot %s --founder NAME" % (tid, task["evidence"].get("snapshot_sha256"))
         reject = "trusted reject %s --founder NAME --reason TEXT" % tid
@@ -1152,11 +1260,175 @@ class TrustedEngine:
             self.store.transition(task_id, "rejected", "Human rejected snapshot: " + founder, evidence)
         return self.store.get(task_id)
 
+    def _finish_locked_cancel(self, task_id):
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            cur = row["status"]
+            if cur == "cancelled":
+                return self.store.get(task_id), False
+            if cur not in ACTIVE | {"created", "awaiting_approval"}:
+                raise PolicyError("cannot cancel a terminal task")
+            conn.execute("UPDATE tasks SET cancel=1,status='cancelled' WHERE id=?", (task_id,))
+            self.store.log(conn, task_id, "cancelled", "Cancellation requested by operator")
+        return self.store.get(task_id), True
+
+    def _request_cancel_flag(self, task_id):
+        """Set cancel=1 without mutating status behind an active lock holder."""
+        with self.store.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status, cancel FROM tasks WHERE id=?", (task_id,)).fetchone()
+            cur = row["status"]
+            if cur == "cancelled":
+                return "already_cancelled"
+            if cur not in ACTIVE | {"created", "awaiting_approval"}:
+                raise PolicyError("cannot cancel a terminal task")
+            if not row["cancel"]:
+                conn.execute("UPDATE tasks SET cancel=1 WHERE id=?", (task_id,))
+                self.store.log(conn, task_id, cur, "Cancellation requested by operator")
+        return "flagged"
+
     def cancel(self, task_id):
-        # A running owner polls this flag; a task awaiting approval ends immediately.
+        """Cancel a trusted-local task safely without racing an active owner.
+
+        1. If executor.lock is unheld, immediately transitions any non-terminal state
+           to terminal cancelled.
+        2. If executor.lock is held, durably sets cancel=1 WITHOUT mutating status
+           behind the lock holder's back, then re-checks executor.lock so an owner that
+           released the lock in the race window cannot leave the task stuck non-terminal.
+        Never claims external or escaped descendant processes (issue #2) were verified stopped.
+        """
         self.require(task_id)
-        self.store.cancel(task_id)
-        return self.store.get(task_id)
+        try:
+            with self.store.lock(task_id):
+                task, changed = self._finish_locked_cancel(task_id)
+                task["cancellation"] = {
+                    "mode": "immediate" if changed else "already_cancelled",
+                    "owner_active": False,
+                    "terminal_guaranteed": True,
+                    "process_cleanup_verified": False,
+                    "note": (
+                        "executor.lock was unheld; task is terminal cancelled, but any previously "
+                        "escaped descendants (issue #2) are not verified stopped"
+                    ),
+                }
+                return task
+        except PolicyError as exc:
+            if str(exc) != "task already has an active owner":
+                raise
+
+        state = self._request_cancel_flag(task_id)
+        if state == "already_cancelled":
+            task = self.store.get(task_id)
+            task["cancellation"] = {
+                "mode": "already_cancelled",
+                "owner_active": False,
+                "terminal_guaranteed": True,
+                "process_cleanup_verified": False,
+                "note": "task was already cancelled",
+            }
+            return task
+
+        # Double-check lock after cancel=1 is durable to close the cancel/owner-release race.
+        try:
+            with self.store.lock(task_id):
+                task = self.require(task_id)
+                if task["status"] in ACTIVE | {"created", "awaiting_approval"}:
+                    task, _ = self._finish_locked_cancel(task_id)
+                    mode = "immediate_after_owner_release"
+                else:
+                    mode = "owner_finished_terminal"
+                task["cancellation"] = {
+                    "mode": mode,
+                    "owner_active": False,
+                    "terminal_guaranteed": True,
+                    "process_cleanup_verified": False,
+                    "note": (
+                        "executor.lock re-checked after setting cancel=1; task is terminal, "
+                        "but escaped descendants (issue #2) are not verified stopped"
+                    ),
+                }
+                return task
+        except PolicyError as exc:
+            if str(exc) != "task already has an active owner":
+                raise
+            task = self.store.get(task_id)
+            task["cancellation"] = {
+                "mode": "signalled_active_owner",
+                "owner_active": True,
+                "terminal_guaranteed": False,
+                "process_cleanup_verified": False,
+                "note": (
+                    "cancel flag set for running owner; terminal transition and process "
+                    "termination are NOT yet guaranteed (check trusted status or trusted recover "
+                    "if the owner crashes; escaped descendants under issue #2 are not guaranteed stopped)"
+                ),
+            }
+            return task
+
+    def recover(self, task_id):
+        """Mark an abandoned trusted-local task terminal without restarting agents.
+
+        Handles abandoned mid-phase tasks (created, preparing without clone_ready,
+        implementing, verifying -> interrupted), abandoned partial review folders
+        (awaiting_approval with unrecorded review-N/ -> interrupted), and abandoned
+        partial exports (approved with unrecorded export.patch -> invalidated).
+
+        Refuses live-locked tasks, normal resting states, clean approved tasks,
+        terminal tasks, and Confined Mode tasks. Never claims escaped descendants
+        (issue #2) were verified stopped.
+        """
+        self.require(task_id)
+        with self.store.lock(task_id):
+            task = self.require(task_id)
+            status = task["status"]
+            home = self.store.task_dir(task_id)
+            attempts = task["evidence"].get("review_attempts", 0)
+            partial_review = (
+                status == "awaiting_approval"
+                and os.path.lexists(home / ("review-%d" % (attempts + 1)))
+                and not self.store.has_artifact(task_id, "review.%d" % (attempts + 1))
+            )
+            partial_export = (
+                status == "approved"
+                and os.path.lexists(home / "export.patch")
+                and not self.store.has_artifact(task_id, "export")
+            )
+            abandoned_active = (
+                status in ("created", "implementing", "verifying")
+                or (status == "preparing" and not self.store.has_artifact(task_id, "clone_ready"))
+            )
+            if partial_export:
+                self.store.transition(
+                    task_id, "invalidated",
+                    "Partial export detected without owner; task invalidated without overwriting "
+                    "export.patch (process cleanup not verified; see #2)",
+                )
+                reason = "partial_export"
+            elif abandoned_active or partial_review:
+                msg = (
+                    "Abandoned partial review folder detected without owner; marked interrupted "
+                    "without restarting reviewer (process cleanup not verified; see #2)"
+                    if partial_review else
+                    "Owner absent; marked interrupted without restarting agents "
+                    "(escaped/external process termination is not verified; see #2)"
+                )
+                Engine(self.store)._finish(task_id, "interrupted", msg)
+                reason = "partial_review" if partial_review else "abandoned_active"
+            else:
+                raise PolicyError("only an abandoned active task, partial review, or partial export can be recovered")
+            result = self.store.get(task_id)
+            result["recovery"] = {
+                "reason": reason,
+                "owner_lock_acquired": True,
+                "restarted_agents": False,
+                "process_cleanup_verified": False,
+                "process_cleanup_note": (
+                    "recover verified only that executor.lock is unheld; escaped or detached "
+                    "descendant processes (issue #2) are not enumerated or guaranteed stopped"
+                ),
+            }
+            return result
 
     def status(self, task_id):
         task = self.require(task_id)
