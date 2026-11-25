@@ -344,19 +344,37 @@ class TrustedLocalReportIntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.get(task_id)["status"], "awaiting_approval")
 
     def test_04_missing_corrupt_or_blocked_evidence_never_suggests_approve_or_export(self):
-        # 1. Corrupt verification artifact in awaiting_approval -> never suggest approve.
+        # 1. Missing verification artifact in awaiting_approval -> never suggest approve.
+        t0 = self.run_to_verified()
+        with self.store.connect() as conn:
+            conn.execute("DELETE FROM artifacts WHERE task_id=? AND kind='verification'", (t0,))
+        d0 = report.build_trusted_report(self.store.root, t0, check_live=True)
+        self.assertFalse(d0["integrity"]["recorded_evidence_valid"])
+        self.assertTrue(any("verification" in b for b in d0["integrity"]["gate_blockers"]))
+        self.assertFalse(any("trusted approve" in s for s in d0["next"]), d0["next"])
+
+        # 2. Corrupt verification artifact in awaiting_approval -> never suggest approve.
         t1 = self.run_to_verified()
         with self.store.connect() as conn:
             conn.execute(
                 "UPDATE artifacts SET body=? WHERE task_id=? AND kind='verification'",
                 (canonical({"tampered": True}).decode(), t1),
             )
-        d1 = report.build_trusted_report(self.store.root, t1, check_live=False)
+        d1 = report.build_trusted_report(self.store.root, t1, check_live=True)
         self.assertFalse(d1["integrity"]["recorded_evidence_valid"])
         self.assertTrue(d1["integrity"]["gate_blockers"])
         self.assertFalse(any("trusted approve" in s for s in d1["next"]), d1["next"])
 
-        # 2. Normal execution_context with offline-fixture codex -> real gate refuses approval,
+        # 3. Wrong snapshot SHA in task evidence -> never suggest approve.
+        t_bad_sha = self.run_to_verified()
+        bad_ev = dict(self.store.get(t_bad_sha)["evidence"], snapshot_sha256="0" * 64)
+        with self.store.connect() as conn:
+            conn.execute("UPDATE tasks SET evidence=? WHERE id=?", (canonical(bad_ev).decode(), t_bad_sha))
+        d_sha = report.build_trusted_report(self.store.root, t_bad_sha, check_live=True)
+        self.assertFalse(d_sha["integrity"]["recorded_evidence_valid"])
+        self.assertFalse(any("trusted approve" in s for s in d_sha["next"]), d_sha["next"])
+
+        # 4. Normal execution_context with offline-fixture codex -> real gate refuses approval,
         # so report MUST flag gate_blocker and NEVER suggest approve!
         normal_engine = trusted.TrustedEngine(self.store, test_context=False)
         t2 = self.run_to_verified(engine=normal_engine)
@@ -364,7 +382,7 @@ class TrustedLocalReportIntegrationTests(unittest.TestCase):
         self.assertTrue(any("offline-fixture" in b for b in d2["integrity"]["gate_blockers"]), d2["integrity"])
         self.assertFalse(any("trusted approve" in s for s in d2["next"]), d2["next"])
 
-        # 3. Approved task with drifted clone or partial export.patch -> NEVER suggest export!
+        # 5. Approved task with partial unrecorded export.patch -> NEVER suggest export!
         t3 = self.run_to_verified()
         sha = self.store.get(t3)["evidence"]["snapshot_sha256"]
         self.engine.approve(t3, sha, "Offline reviewer")
@@ -378,18 +396,18 @@ class TrustedLocalReportIntegrationTests(unittest.TestCase):
             extra="review-scenario: pass", review_model="test-reviewer", review_context="scoped",
         )
         self.assertEqual(self.engine.review(scoped_id, str(FAKE_CLAUDE))["review"]["outcome"], "completed")
-        sd = report.build_trusted_report(self.store.root, scoped_id)
+        sd = report.build_trusted_report(self.store.root, scoped_id, check_live=True)
         self.assertIn("not a full-repository review", sd["review"]["scope_notice"])
         self.assertEqual(sd["integrity"]["gate_blockers"], [])
 
         blocked_id = self.run_to_verified(extra="review-scenario: blocking", review_model="test-reviewer")
         self.assertTrue(self.engine.review(blocked_id, str(FAKE_CLAUDE))["review"]["blocking"])
-        before_ov = report.build_trusted_report(self.store.root, blocked_id, check_live=False)
+        before_ov = report.build_trusted_report(self.store.root, blocked_id, check_live=True)
         self.assertTrue(any("--override-review" in step for step in before_ov["next"]))
 
         sha = self.store.get(blocked_id)["evidence"]["snapshot_sha256"]
         self.engine.approve(blocked_id, sha, "Founder", override_review="Accepted known fixture blocker")
-        after_ov = report.build_trusted_report(self.store.root, blocked_id, check_live=False)
+        after_ov = report.build_trusted_report(self.store.root, blocked_id, check_live=True)
         self.assertEqual(after_ov["approval"]["review_override"], "Accepted known fixture blocker")
         self.assertIn("Accepted known fixture blocker", report.render_markdown(after_ov))
 
@@ -400,6 +418,108 @@ class TrustedLocalReportIntegrationTests(unittest.TestCase):
         self.assertEqual(rej["task"]["status"], "rejected")
         self.assertEqual(rej["rejection"]["reason"], "Blocking issue not accepted")
         self.assertEqual(rej["next"], [])
+
+    def test_06_no_live_check_never_suggests_approve_or_export(self):
+        # Fail-closed invariant: without live clone & source-guard verification,
+        # report MUST NOT suggest `trusted approve` or `trusted export`.
+        task_id = self.run_to_verified(extra="review-scenario: pass", review_model="test-reviewer")
+        self.engine.review(task_id, str(FAKE_CLAUDE))
+
+        no_live = report.build_trusted_report(self.store.root, task_id, check_live=False)
+        self.assertIsNone(no_live["integrity"]["live_snapshot_matches"])
+        self.assertIsNone(no_live["integrity"]["source_guard_matches"])
+        self.assertTrue(any("--no-live-check" in b for b in no_live["integrity"]["gate_blockers"]), no_live["integrity"])
+        self.assertFalse(any("trusted approve" in s for s in no_live["next"]), no_live["next"])
+        self.assertIn("trusted report " + task_id, no_live["next"])
+
+        # CLI --no-live-check matches the same guarantee.
+        res = run_cli("--root", str(self.store.root), "trusted", "report", task_id, "--no-live-check")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        cli_no_live = json.loads(res.stdout)
+        self.assertFalse(any("trusted approve" in s for s in cli_no_live["next"]))
+
+        # Same for approved task before export: --no-live-check MUST NOT suggest export.
+        sha = self.store.get(task_id)["evidence"]["snapshot_sha256"]
+        self.engine.approve(task_id, sha, "Offline reviewer")
+        appr_no_live = report.build_trusted_report(self.store.root, task_id, check_live=False)
+        self.assertFalse(any("trusted export" in s for s in appr_no_live["next"]), appr_no_live["next"])
+        self.assertIn("trusted report " + task_id, appr_no_live["next"])
+        # With live check enabled on the clean approved task, export IS suggested.
+        appr_live = report.build_trusted_report(self.store.root, task_id, check_live=True)
+        self.assertEqual(appr_live["next"], ["trusted export " + task_id])
+
+    def test_07_stale_review_missing_scoped_context_and_partial_review_block_suggestions(self):
+        # Stale review (bound to wrong snapshot/patch hash) -> blocked.
+        stale_id = self.run_to_verified(extra="review-scenario: pass", review_model="test-reviewer")
+        self.engine.review(stale_id, str(FAKE_CLAUDE))
+        rec = self.store.artifact(stale_id, "review.1")
+        rec["patch_sha256"] = "f" * 64
+        rec["review"]["patch_sha256"] = "f" * 64
+        from workspace import digest as ws_digest
+        ev = dict(self.store.get(stale_id)["evidence"], review_sha256=ws_digest(rec))
+        with self.store.connect() as conn:
+            conn.execute("UPDATE artifacts SET body=?, hash=? WHERE task_id=? AND kind='review.1'",
+                         (canonical(rec).decode(), ws_digest(rec), stale_id))
+            conn.execute("UPDATE tasks SET evidence=? WHERE id=?", (canonical(ev).decode(), stale_id))
+        d_stale = report.build_trusted_report(self.store.root, stale_id, check_live=True)
+        self.assertTrue(any("stale" in b for b in d_stale["integrity"]["gate_blockers"]), d_stale["integrity"])
+        self.assertFalse(any("trusted approve" in s for s in d_stale["next"]), d_stale["next"])
+
+        # Missing scoped-review context -> blocked.
+        scoped_id = self.run_to_verified(
+            extra="review-scenario: pass", review_model="test-reviewer", review_context="scoped",
+        )
+        self.engine.review(scoped_id, str(FAKE_CLAUDE))
+        srec = self.store.artifact(scoped_id, "review.1")
+        srec.pop("context", None)
+        sev = dict(self.store.get(scoped_id)["evidence"], review_sha256=ws_digest(srec))
+        with self.store.connect() as conn:
+            conn.execute("UPDATE artifacts SET body=?, hash=? WHERE task_id=? AND kind='review.1'",
+                         (canonical(srec).decode(), ws_digest(srec), scoped_id))
+            conn.execute("UPDATE tasks SET evidence=? WHERE id=?", (canonical(sev).decode(), scoped_id))
+        d_scoped = report.build_trusted_report(self.store.root, scoped_id, check_live=True)
+        self.assertTrue(any("scoped review context" in b for b in d_scoped["integrity"]["gate_blockers"]), d_scoped["integrity"])
+        self.assertFalse(any("trusted approve" in s for s in d_scoped["next"]), d_scoped["next"])
+
+        # Crashed partial review folder on disk without review.1 artifact -> never suggest review or approve.
+        part_id = self.run_to_verified(extra="review-scenario: pass", review_model="test-reviewer")
+        (self.store.task_dir(part_id) / "review-1").mkdir(mode=0o700)
+        d_part = report.build_trusted_report(self.store.root, part_id, check_live=True)
+        self.assertTrue(any("partial review" in b for b in d_part["integrity"]["gate_blockers"]), d_part["integrity"])
+        self.assertFalse(any("trusted approve" in s or "trusted review" in s for s in d_part["next"]), d_part["next"])
+
+    def test_08_consistent_sqlite_snapshot_under_concurrent_update(self):
+        # Verify report reads tasks, events, and artifacts from ONE consistent SQLite read transaction:
+        # start a concurrent writer right after report begins reading; report must see a consistent
+        # pre-write snapshot (either old status+events or new status+events, never torn).
+        import sqlite3
+        from unittest.mock import patch
+
+        task_id = self.run_to_verified()
+        real_read_art = report._read_artifact
+        mutated = []
+
+        def concurrent_writer_during_read(conn, tid, kind):
+            if not mutated and kind == "verification":
+                mutated.append(True)
+                # Separate connection tries to write while report holds its BEGIN DEFERRED read tx.
+                wconn = sqlite3.connect(str(self.store.root / "state.sqlite3"), timeout=0.05)
+                try:
+                    wconn.execute("UPDATE tasks SET status='rejected' WHERE id=?", (tid,))
+                    wconn.commit()
+                except sqlite3.OperationalError:
+                    # Expected in rollback journal mode: read transaction blocks writer until ROLLBACK.
+                    pass
+                finally:
+                    wconn.close()
+            return real_read_art(conn, tid, kind)
+
+        with patch.object(report, "_read_artifact", side_effect=concurrent_writer_during_read):
+            dossier = report.build_trusted_report(self.store.root, task_id, check_live=True)
+        self.assertTrue(mutated)
+        self.assertEqual(dossier["task"]["status"], "awaiting_approval")
+        self.assertTrue(dossier["integrity"]["recorded_evidence_valid"])
+        self.assertEqual(dossier["integrity"]["gate_blockers"], [])
 
 
 if __name__ == "__main__":

@@ -1215,6 +1215,8 @@ class TrustedEngine:
 
     def next_steps(self, task):
         """Suggested commands for the current state: advice only, never executed."""
+        if task.get("cancel"):
+            return []
         tid, status = task["id"], task["status"]
         approve = "trusted approve %s --snapshot %s --founder NAME" % (tid, task["evidence"].get("snapshot_sha256"))
         reject = "trusted reject %s --founder NAME --reason TEXT" % tid
@@ -1303,10 +1305,11 @@ class TrustedEngine:
                 task["cancellation"] = {
                     "mode": "immediate" if changed else "already_cancelled",
                     "owner_active": False,
+                    "terminal_guaranteed": True,
                     "process_cleanup_verified": False,
                     "note": (
-                        "executor.lock was unheld; any previously escaped descendants (issue #2) "
-                        "are not verified stopped"
+                        "executor.lock was unheld; task is terminal cancelled, but any previously "
+                        "escaped descendants (issue #2) are not verified stopped"
                     ),
                 }
                 return task
@@ -1320,6 +1323,7 @@ class TrustedEngine:
             task["cancellation"] = {
                 "mode": "already_cancelled",
                 "owner_active": False,
+                "terminal_guaranteed": True,
                 "process_cleanup_verified": False,
                 "note": "task was already cancelled",
             }
@@ -1337,10 +1341,11 @@ class TrustedEngine:
                 task["cancellation"] = {
                     "mode": mode,
                     "owner_active": False,
+                    "terminal_guaranteed": True,
                     "process_cleanup_verified": False,
                     "note": (
-                        "executor.lock re-checked after setting cancel=1; escaped descendants "
-                        "(issue #2) are not verified stopped"
+                        "executor.lock re-checked after setting cancel=1; task is terminal, "
+                        "but escaped descendants (issue #2) are not verified stopped"
                     ),
                 }
                 return task
@@ -1351,8 +1356,13 @@ class TrustedEngine:
             task["cancellation"] = {
                 "mode": "signalled_active_owner",
                 "owner_active": True,
+                "terminal_guaranteed": False,
                 "process_cleanup_verified": False,
-                "note": "cancel flag set for running owner; termination is not yet verified",
+                "note": (
+                    "cancel flag set for running owner; terminal transition and process "
+                    "termination are NOT yet guaranteed (check trusted status or trusted recover "
+                    "if the owner crashes; escaped descendants under issue #2 are not guaranteed stopped)"
+                ),
             }
             return task
 

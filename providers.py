@@ -81,10 +81,11 @@ def catalog(*, version):
                 "fallback_to_fake_agents": False,
                 "fallback_to_other_mode": False,
                 "commands": [
-                    "trusted check", "trusted start", "trusted implement",
+                    "trusted check", "trusted list", "trusted report",
+                    "trusted start", "trusted implement",
                     "trusted verify", "trusted review", "trusted diff",
                     "trusted status", "trusted approve", "trusted reject",
-                    "trusted cancel", "trusted export",
+                    "trusted cancel", "trusted recover", "trusted export",
                 ],
                 "providers": ["codex", reviewer.PROVIDER],
             },

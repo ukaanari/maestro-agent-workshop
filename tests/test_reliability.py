@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -367,6 +368,82 @@ class TrustedRecoveryAndCancelTests(unittest.TestCase):
         self.assertEqual(body["status"], "interrupted")
         self.assertFalse(body["recovery"]["process_cleanup_verified"])
         self.assertEqual(body["next"], [])
+
+    def test_09_real_subprocess_sigkill_crash_and_stale_lock_file_recovery(self):
+        # Spawn a real separate process that acquires flock on executor.lock while the task
+        # is in `implementing`, verify recover() refuses while it is alive, SIGKILL it so
+        # executor.lock remains on disk as a stale lock file, then verify recover() succeeds.
+        task_id = self.start()
+        self.force_status(task_id, "implementing")
+        task_dir = self.store.task_dir(task_id)
+        lock_file = task_dir / "executor.lock"
+        ready_file = task_dir / "holder.ready"
+
+        holder_code = (
+            "import fcntl, os, select, sys\n"
+            "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "open(sys.argv[2], 'w').write(str(os.getpid()))\n"
+            "while True:\n"
+            "    select.select([], [], [], 1)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-B", "-c", holder_code, str(lock_file), str(ready_file)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_file(ready_file)
+            with self.assertRaisesRegex(PolicyError, "active owner"):
+                self.engine.recover(task_id)
+            os.kill(proc.pid, signal.SIGKILL)
+        finally:
+            proc.wait(timeout=10)
+
+        # Stale executor.lock file still exists on disk, but kernel released flock on SIGKILL.
+        self.assertTrue(lock_file.exists())
+        recovered = self.engine.recover(task_id)
+        self.assertEqual(recovered["status"], "interrupted")
+        self.assertTrue(recovered["recovery"]["owner_lock_acquired"])
+        self.assertFalse(recovered["recovery"]["restarted_agents"])
+        self.assertFalse(recovered["recovery"]["process_cleanup_verified"])
+
+    def test_10_repeated_cancellation_terminal_guarantee_and_terminal_preservation(self):
+        # 1. Repeated cancellation on resting task is idempotent and guarantees terminal state.
+        tid = self.start()
+        c1 = self.engine.cancel(tid)
+        ev_count = len(self.store.events(tid))
+        c2 = self.engine.cancel(tid)
+        c3 = self.engine.cancel(tid)
+        self.assertEqual(c1["status"], "cancelled")
+        self.assertTrue(c1["cancellation"]["terminal_guaranteed"])
+        self.assertFalse(c1["cancellation"]["process_cleanup_verified"])
+        self.assertEqual(c2["cancellation"]["mode"], "already_cancelled")
+        self.assertEqual(c3["cancellation"]["mode"], "already_cancelled")
+        self.assertEqual(len(self.store.events(tid)), ev_count)
+
+        # 2. Signalling an active owner explicitly reports terminal_guaranteed=False and empty next_steps.
+        locked_id = self.start()
+        self.force_status(locked_id, "implementing")
+        with self.store.lock(locked_id):
+            sig = self.engine.cancel(locked_id)
+            self.assertEqual(sig["cancellation"]["mode"], "signalled_active_owner")
+            self.assertFalse(sig["cancellation"]["terminal_guaranteed"])
+            self.assertFalse(sig["cancellation"]["process_cleanup_verified"])
+            self.assertEqual(self.engine.next_steps(sig), [])
+            # Repeated cancel while still locked does not duplicate log entries or fail.
+            sig2 = self.engine.cancel(locked_id)
+            self.assertEqual(sig2["cancellation"]["mode"], "signalled_active_owner")
+
+        # 3. Terminal states are never overwritten by cancel() or clean recover().
+        for term in ("approved", "rejected", "failed", "timed_out", "interrupted", "invalidated", "blocked"):
+            with self.subTest(terminal=term):
+                t = self.start()
+                self.force_status(t, term)
+                with self.assertRaisesRegex(PolicyError, "terminal"):
+                    self.engine.cancel(t)
+                with self.assertRaisesRegex(PolicyError, "abandoned"):
+                    self.engine.recover(t)
+                self.assertEqual(self.store.get(t)["status"], term)
 
 
 if __name__ == "__main__":

@@ -167,6 +167,14 @@ def _evaluate_gate_blockers(task, artifacts, review_record, review_summary, issu
     if status not in ("awaiting_approval", "approved"):
         return list(dict.fromkeys(blockers))
 
+    # Fail closed: never claim approval/export readiness when live checks were skipped.
+    if live_snapshot_matches is None:
+        blockers.append("live clone snapshot not verified (--no-live-check); run trusted report without "
+                        "--no-live-check before approval or export")
+    if source_guard_matches is None:
+        blockers.append("source repository guard not verified (--no-live-check); run trusted report without "
+                        "--no-live-check before approval or export")
+
     # 1. Snapshot evidence binding
     snap = artifacts["snapshot"][0] if "snapshot" in artifacts else None
     if snap is None:
@@ -211,6 +219,9 @@ def _evaluate_gate_blockers(task, artifacts, review_record, review_summary, issu
     # 4. Independent review gate (when required)
     requested_review = spec.get("review")
     if isinstance(requested_review, dict):
+        attempts = evidence.get("review_attempts", 0)
+        if status == "awaiting_approval" and os.path.lexists(task_dir / ("review-%d" % (attempts + 1))):
+            blockers.append("partial review folder detected on disk without recorded review artifact (run trusted recover)")
         if review_record is None:
             blockers.append("required review has not been completed")
         else:
@@ -275,6 +286,7 @@ def _next_steps(task, has_clone_ready, has_export, review_summary, gate_blockers
     if task["cancel"]:
         return []
     has_integrity_problem = bool(issues) or live_snapshot_matches is False or source_guard_matches is False
+    live_unverified = (live_snapshot_matches is None or source_guard_matches is None)
     if status == "preparing":
         return ["trusted implement %s" % tid] if (has_clone_ready and not has_integrity_problem) else []
     if status == "reviewing":
@@ -282,14 +294,21 @@ def _next_steps(task, has_clone_ready, has_export, review_summary, gate_blockers
     if status == "awaiting_approval":
         reject = "trusted reject %s --founder NAME --reason TEXT" % tid
         steps = [] if issues else ["trusted diff %s" % tid]
-        # Never suggest approve when any recorded or live gate blocker exists.
+        if any("partial review" in b for b in gate_blockers):
+            return steps + ["trusted recover %s" % tid, reject]
+        # Never suggest approve when any recorded or live integrity problem exists.
         if has_integrity_problem:
             return steps + [reject]
         if review_summary is not None and review_summary.get("outcome") != "completed":
-            # Only offer retry if no non-review blocker prevents verification/snapshot integrity.
-            non_review_blockers = [b for b in gate_blockers if "review" not in b]
+            non_review_blockers = [b for b in gate_blockers if "review" not in b and "--no-live-check" not in b]
             if not non_review_blockers and review_summary["attempts"] < reviewer.ATTEMPTS:
                 steps.append("trusted review %s" % tid)
+            return steps + [reject]
+        if live_unverified:
+            # Fail closed: never suggest approve when live clone/source checks were skipped.
+            other_blockers = [b for b in gate_blockers if "--no-live-check" not in b]
+            if not other_blockers:
+                steps.append("trusted report %s" % tid)
             return steps + [reject]
         if gate_blockers:
             return steps + [reject]
@@ -298,7 +317,12 @@ def _next_steps(task, has_clone_ready, has_export, review_summary, gate_blockers
             return steps + [reject, approve + " --override-review REASON"]
         return steps + [approve, reject]
     if status == "approved" and not has_export:
-        if gate_blockers or has_integrity_problem:
+        if has_integrity_problem:
+            return []
+        if live_unverified:
+            other_blockers = [b for b in gate_blockers if "--no-live-check" not in b]
+            return [] if other_blockers else ["trusted report %s" % tid]
+        if gate_blockers:
             return []
         return ["trusted export %s" % tid]
     return []

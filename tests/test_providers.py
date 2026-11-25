@@ -213,6 +213,12 @@ class ProvidersCatalogTests(unittest.TestCase):
         self.assertEqual(help_proc.returncode, 0)
         for cmd in ("doctor", "providers", "create", "run", "approve", "trusted"):
             self.assertIn(cmd, help_proc.stdout)
+        trusted_help = self.run_cli("trusted", "--help")
+        self.assertEqual(trusted_help.returncode, 0)
+        data = providers.catalog(version=maestro.__version__)
+        for full_cmd in data["modes"][trusted.MODE]["commands"]:
+            sub = full_cmd.split(" ", 1)[1]
+            self.assertIn(sub, trusted_help.stdout)
         for adapter in (CodexAdapter(), ClaudeCodeAdapter()):
             with self.assertRaises(PolicyError):
                 adapter.run({})
