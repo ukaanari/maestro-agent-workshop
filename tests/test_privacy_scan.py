@@ -243,21 +243,35 @@ class PrivacyScanTests(unittest.TestCase):
         info.mkdir(parents=True, exist_ok=True)
         (info / "privacy-denylist").write_text("project bluebird\n")
         self.write("notes.md", "Roadmap for Project Bluebird  <!-- privacy-scan: allow -->\n"
-                               "Example key: %s  <!-- privacy-scan: allow -->\n" % SECRETS["aws-access-key"])
+                               "Example path: /Users/" + "alice/project  <!-- privacy-scan: allow -->\n")
         code, output = self.scan("staged")
         self.assertEqual(code, 1, output)
         self.assertIn("private-term-1           notes.md:1", output)
         self.assertNotIn("luebird", output)
-        self.assertNotIn("aws-access-key", output)  # the marker still covers a deliberate example
+        self.assertNotIn("home-path", output)  # the marker still covers heuristic public examples
         self.git("commit", "-q", "--no-verify", "-m", "Mention project bluebird  privacy-scan: allow")
         head = self.git("rev-parse", "HEAD").strip()
         code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (head, "0" * 40))
         self.assertEqual(code, 1)
         self.assertIn("message:1", output)  # commit messages cannot suppress private terms either
 
-    def test_allow_marker_skips_a_reviewed_public_example(self):
-        self.write("docs/example.md", "Example key: %s  <!-- privacy-scan: allow -->\n" % SECRETS["aws-access-key"])
+    def test_allow_marker_skips_heuristic_example_but_never_high_confidence_secrets(self):
+        self.write("docs/example.md", "Example path: /Users/" + "alice/project  <!-- privacy-scan: allow -->\n")
         self.assertEqual(self.scan("staged")[0], 0)
+
+        high_conf = (
+            "private-key", "aws-access-key", "github-token", "anthropic-key",
+            "openai-key", "slack-token", "google-api-key", "jwt",
+        )
+        for index, rule in enumerate(high_conf):
+            self.write("docs/leak_%d.md" % index, "Example: %s  <!-- privacy-scan: allow -->\n" % SECRETS[rule])
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for index, rule in enumerate(high_conf):
+            with self.subTest(rule=rule):
+                self.assertIn("%s" % rule, output)
+                self.assertIn("docs/leak_%d.md:1" % index, output)
+                self.assertNotIn(SECRETS[rule][-10:], output)
 
     def test_hooks_install_block_a_commit_and_respect_foreign_hooks(self):
         hooks = self.repo / ".git" / "hooks"
@@ -286,3 +300,143 @@ class PrivacyScanTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-B", str(SCANNER), "tracked"], cwd=ROOT,
                                 capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unquoted_secret_assignments_and_bearer_tokens_are_blocked(self):
+        secret_a = "Zq8rT4mW9xL2" + "pK7nB3vC6yH1"
+        secret_b = "Km4nP9qR2sT7" + "vW5xY8zB3cD6"
+        secret_c = "Hx7jL2mN5pQ9" + "rS4tU8vW1yZ3"
+        self.write("deploy/run.sh", "export API_TOKEN=" + secret_a + "\n")
+        self.write("deploy/config.yml", "service_secret: " + secret_b + "\n")
+        self.write("deploy/curl.sh", "curl -H 'Authorization: Bearer " + secret_c + "' https://api.example.com\n")
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        self.assertIn("secret-assignment        deploy/run.sh:1", output)
+        self.assertIn("secret-assignment        deploy/config.yml:1", output)
+        self.assertIn("bearer-token             deploy/curl.sh:1", output)
+        for val in (secret_a, secret_b, secret_c):
+            self.assertNotIn(val, output)
+            self.assertNotIn(val[-10:], output)
+
+        # Benign unquoted code identifiers, placeholders, paths and hex digests must stay clean.
+        clean = self.repo / "clean-unquoted"
+        self.repo = clean
+        clean.mkdir()
+        self.git("init", "-q")
+        self.write("app.py", "\n".join([
+            "api_token = some_module_helper_function_name_here",
+            "TOKEN_NAME = SOME_UPPERCASE_CONSTANT_IDENTIFIER_NAME",
+            "token_path = /var/run/service/runtime/token_socket_file",
+            "api_key = a163de5a86dcf4eb7586ecabf7df09280589c19ca6ad5fb996e61391b7f92b5c",
+            "export API_TOKEN=your-example-token-placeholder-value",
+            "Authorization: Bearer example-placeholder-token-value-1234",
+            "",
+        ]))
+        self.assertEqual(self.scan("staged"), (0, "privacy-scan: clean\n"))
+
+    def test_trailing_slash_free_home_paths_are_blocked_unless_allowed(self):
+        self.write("env.sh", "\n".join([
+            "HOME=/Users/" + "alice",
+            'cwd="/home/' + 'bob"',
+            "WIN=C:\\Users\\" + "charlie",
+            "",
+        ]))
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for line_no in (1, 2, 3):
+            self.assertIn("home-path                env.sh:%d" % line_no, output)
+        for name in ("alice", "bob", "charlie"):
+            self.assertNotIn(name, output)
+
+        clean = self.repo / "clean-home"
+        self.repo = clean
+        clean.mkdir()
+        self.git("init", "-q")
+        self.write("doc.md", "HOME=/Users/runner\nHOME=/home/user\nC:\\Users\\example\n")
+        self.assertEqual(self.scan("staged"), (0, "privacy-scan: clean\n"))
+
+    def test_private_terms_and_secrets_in_commit_author_and_committer_names_are_blocked(self):
+        info = Path(self.git("rev-parse", "--git-path", "info").strip())
+        if not info.is_absolute():
+            info = self.repo / info
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "privacy-denylist").write_text("secretname\n")
+
+        self.write("a.py", "x = 1\n")
+        self.git("commit", "-q", "-m", "author denylist",
+                 env={"GIT_AUTHOR_NAME": "SecretName Dev", "GIT_COMMITTER_NAME": "Test"})
+        c1 = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (c1, "0" * 40))
+        self.assertEqual(code, 1, output)
+        self.assertIn("private-term-1           commit %s author" % c1[:12], output)
+        self.assertNotIn("committer", output)
+        self.assertNotIn("SecretName", output)
+        self.assertNotIn("secretname", output)
+
+        # Committer name carrying a denylisted term AND author carrying an embedded email/key.
+        self.write("b.py", "y = 2\n")
+        self.git("commit", "-q", "-m", "committer denylist",
+                 env={"GIT_AUTHOR_NAME": "Dev " + SECRETS["personal-email"],
+                      "GIT_COMMITTER_NAME": "SecretName Bot"})
+        c2 = self.git("rev-parse", "HEAD").strip()
+        code, output = self.scan("push", stdin="refs/heads/main %s refs/heads/main %s\n" % (c2, c1))
+        self.assertEqual(code, 1, output)
+        self.assertIn("personal-email           commit %s author" % c2[:12], output)
+        self.assertIn("private-term-1           commit %s committer" % c2[:12], output)
+        self.assertNotIn("SecretName", output)
+        self.assertNotIn(SECRETS["personal-email"], output)
+
+    def test_placeholder_substrings_inside_real_secrets_do_not_bypass_scanner(self):
+        embedded_test = "Zq8rT4mW9xL2" + "test" + "K7nB3vC6yH1"
+        prefixed_real = "test-" + "Km4nP9qR2sT7" + "vW5xY8zB3cD6"
+        url_embedded = "https://deploy:" + "Ab9xK2testP8mQ" + "@db.internal/app"
+        self.write("cfg/a.py", 'api_key = "%s"\n' % embedded_test)
+        self.write("cfg/b.sh", "export API_TOKEN=%s\n" % prefixed_real)
+        self.write("cfg/c.py", 'url = "%s"\n' % url_embedded)
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        self.assertIn("secret-assignment        cfg/a.py:1", output)
+        self.assertIn("secret-assignment        cfg/b.sh:1", output)
+        self.assertIn("url-credentials          cfg/c.py:1", output)
+        for val in (embedded_test, prefixed_real, "Ab9xK2testP8mQ"):
+            self.assertNotIn(val, output)
+
+    def test_secrets_and_private_terms_in_file_paths_are_blocked_and_redacted(self):
+        info = Path(self.git("rev-parse", "--git-path", "info").strip())
+        if not info.is_absolute():
+            info = self.repo / info
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "privacy-denylist").write_text("project bluebird\n")
+
+        paths = [
+            "docs/project-bluebird-notes.md",
+            "exports/" + SECRETS["aws-access-key"] + ".bin",
+            "mail/" + SECRETS["personal-email"] + ".txt",
+            "Users/alice/dump.txt",
+        ]
+        for p in paths:
+            target = self.repo / p
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"\x00binary-payload" if p.endswith(".bin") else b"harmless\n")
+            self.git("add", "--", p)
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for expected_rule in ("private-term-1", "aws-access-key", "personal-email", "home-path"):
+            self.assertIn(expected_rule, output)
+        self.assertIn("<redacted-path>", output)
+        for sensitive in ("bluebird", SECRETS["aws-access-key"], SECRETS["personal-email"], "alice"):
+            self.assertNotIn(sensitive, output)
+
+    def test_additional_cloud_and_key_paths_are_blocked(self):
+        blocked = {
+            ".aws/credentials": "credential-file",
+            "ops/.kube/config": "credential-file",
+            ".docker/config.json": "credential-file",
+            "keys/AuthKey.p8": "private-key-file",
+        }
+        for path in blocked:
+            self.write(path, "harmless\n")
+        code, output = self.scan("staged")
+        self.assertEqual(code, 1, output)
+        for path, rule in blocked.items():
+            with self.subTest(path=path):
+                self.assertIn("%s %s  (" % (rule.ljust(24), path), output)
