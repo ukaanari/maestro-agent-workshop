@@ -437,12 +437,46 @@ def counted(summary):
     return summary
 
 
+def _check_hints(baseline, source_clean):
+    """Heuristic, non-authoritative possible causes matched from truncated check output."""
+    hints = []
+    if not source_clean:
+        hints.append("Observation: the source repository working tree has uncommitted or non-ignored "
+                     "untracked changes relative to its current HEAD (trusted check cloned --base, not "
+                     "working-tree edits). Commit or stash changes before trusted start and leave the "
+                     "source repository untouched while a task is open.")
+    if baseline.get("passed"):
+        return hints
+    text = (baseline.get("excerpt") or "") + "\n" + (baseline.get("reason") or "")
+    if "MAESTRO: no tests ran" in text:
+        hints.append("Possible cause: no tests were discovered under the configured layout. "
+                     "Check --test-dir, --test-pattern, or --top-level-dir.")
+    elif "MAESTRO: no test executed" in text:
+        hints.append("Possible cause: every discovered test was skipped; Trusted Local verification "
+                     "requires at least one executed test.")
+    if "subprocess.py" in text or "Popen" in text or "os.fork" in text:
+        hints.append("Possible cause: a test may have attempted subprocess or fork execution, which "
+                     "confined verification denies. Confirm locally or target a pure in-process "
+                     "unittest subset with --test-pattern.")
+    if "ModuleNotFoundError" in text or "ImportError" in text:
+        hints.append("Possible cause: an import may have failed inside confined verification. "
+                     "Check --pythonpath / --top-level-dir, or whether the test depends on packages "
+                     "not available inside the repository.")
+    if "socket.py" in text or "urllib" in text:
+        hints.append("Possible cause: a test may have attempted network access, which confined "
+                     "verification denies.")
+    return hints
+
+
 def check(repo, base, verify=None):
     """Read-only compatibility check: no task, state, agent or model.
 
     Clones the base into a private temporary directory, captures the snapshot a task
     would bind and runs the configured verification on it under Seatbelt. Before an
     implementation a failing baseline can be expected; a snapshot or setup error cannot.
+    `source_clean` reports whether the source working tree had no staged, unstaged, or
+    non-ignored untracked changes relative to its current HEAD at check time (gitignored
+    files are excluded, and verification always runs against the pinned `base` commit).
     """
     command = verification_command(verify)
     if sys.platform != "darwin" or sys.version_info[:2] != (3, 9):
@@ -453,6 +487,7 @@ def check(repo, base, verify=None):
     with tempfile.TemporaryDirectory(prefix="maestro-check-") as temp:
         home = Path(os.path.realpath(temp))
         before = source_guard(repo, home)
+        source_clean = not bool(before.get("status"))
         clone = home / "clone"
         git(home, home, "clone", "--no-hardlinks", "--no-checkout", "--template=", str(repo), str(clone))
         git(clone, home, "checkout", "--detach", base)
@@ -462,7 +497,9 @@ def check(repo, base, verify=None):
         verification_dirs(snap, verify)
         report = {"compatible": False, "repo": str(repo), "base": base, "snapshot_sha256": snap["sha256"],
                   "files": sum(e["type"] == "file" for e in snap["manifest"].values()),
-                  "ignored_paths": len(snap["ignored"]), "verify": verify, "command": command}
+                  "ignored_paths": len(snap["ignored"]), "source_clean": source_clean,
+                  "source_clean_scope": "working_tree_vs_source_head_excluding_gitignored",
+                  "verify": verify, "command": command}
         output = None
         try:
             output = confined_verify(home, materialize(clone, home, snap, home / "verify"), command)
@@ -478,6 +515,13 @@ def check(repo, base, verify=None):
                 counted(report["baseline"]["summary"])
             except PolicyError as exc:
                 report["baseline"].update(passed=False, reason=str(exc))
+        hints = _check_hints(report["baseline"], source_clean)
+        if hints:
+            report["hints"] = hints
+            report["hints_note"] = (
+                "Heuristic observations/possible causes matched from truncated output and source status; "
+                "not a definitive diagnosis."
+            )
         if source_guard(repo, home) != before:
             raise IntegrityError("source repository guard changed during check")
     report["compatible"] = True

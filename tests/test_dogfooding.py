@@ -1,0 +1,217 @@
+"""Offline dogfooding and `trusted check` diagnostics tests.
+
+No model, login, network service or credentials.
+"""
+import importlib.util
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import trusted
+from execution import PolicyError
+from workflow import Store
+
+FAKE_CODEX = ROOT / "tests" / "fixtures" / "fake_codex.py"
+FAKE_CLAUDE = ROOT / "tests" / "fixtures" / "fake_claude.py"
+spec = importlib.util.spec_from_file_location("dogfood_fixture", ROOT / "examples/trusted-local/make_fixture.py")
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+RUNTIME = unittest.skipUnless(sys.platform == "darwin" and sys.version_info[:2] == (3, 9),
+                              "trusted-local requires macOS and /usr/bin/python3 (Python 3.9)")
+
+
+class CheckHintUnitTests(unittest.TestCase):
+    """Runs on every Python interpreter."""
+
+    def test_check_hints_cover_common_failure_modes(self):
+        self.assertEqual(trusted._check_hints({"passed": True}, True), [])
+
+        dirty = trusted._check_hints({"passed": True}, False)
+        self.assertEqual(len(dirty), 1)
+        self.assertTrue(dirty[0].startswith("Observation:"))
+        self.assertIn("uncommitted or non-ignored untracked changes", dirty[0])
+
+        no_tests = trusted._check_hints({"passed": False, "excerpt": "MAESTRO: no tests ran"}, True)
+        self.assertTrue(any(h.startswith("Possible cause:") and "--test-dir" in h for h in no_tests))
+
+        all_skipped = trusted._check_hints({"passed": False, "excerpt": "MAESTRO: no test executed"}, True)
+        self.assertTrue(any(h.startswith("Possible cause:") and "skipped" in h for h in all_skipped))
+
+        subproc = trusted._check_hints({"passed": False, "excerpt": "File subprocess.py Popen PermissionError"}, True)
+        self.assertTrue(any(h.startswith("Possible cause:") and "subprocess" in h for h in subproc))
+
+        imp = trusted._check_hints({"passed": False, "excerpt": "ModuleNotFoundError: No module named 'pkg'"}, True)
+        self.assertTrue(any(h.startswith("Possible cause:") and "--pythonpath" in h for h in imp))
+
+        net = trusted._check_hints({"passed": False, "excerpt": "File socket.py PermissionError"}, True)
+        self.assertTrue(any(h.startswith("Possible cause:") and "network" in h for h in net))
+
+
+@RUNTIME
+class DogfoodingIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix=".dogfood-tests-", dir=ROOT)
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+
+    def git(self, cwd, *args):
+        return trusted.git(cwd, self.root, *args)
+
+    def materialize_non_shallow_maestro_head(self):
+        """Export MAESTRO HEAD into a clean, non-shallow temporary Git repository.
+
+        GitHub Actions checkouts are shallow (fetch-depth: 1), and MAESTRO's
+        clone_config() intentionally refuses shallow clone metadata. Building a
+        standalone commit from `git archive HEAD` keeps the test offline and
+        preserves the security check intact.
+        """
+        repo = self.root / "maestro-self"
+        repo.mkdir()
+        archive = self.git(ROOT, "archive", "--format=tar", "HEAD")
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tf:
+            for member in tf.getmembers():
+                if member.name.startswith("/") or ".." in Path(member.name).parts:
+                    self.fail("unexpected archive member: " + member.name)
+                if not (member.isdir() or member.isreg()):
+                    self.fail("unexpected archive entry type: " + member.name)
+            tf.extractall(repo)
+        self.git(repo, "init", "-q")
+        self.git(repo, "config", "user.name", "MAESTRO Test")
+        self.git(repo, "config", "user.email", "maestro-test@example.invalid")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "snapshot of MAESTRO HEAD for offline self-check")
+        base = self.git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        return repo, base
+
+    @unittest.skipUnless((ROOT / ".git").exists(), "needs the MAESTRO Git checkout")
+    def test_01_maestro_self_check_on_pure_stdlib_test_subset(self):
+        repo, base = self.materialize_non_shallow_maestro_head()
+        verify = trusted.verify_config(test_dir="tests", pattern="test_check_suite.py")
+        report = trusted.check(repo, base, verify)
+        self.assertTrue(report["compatible"])
+        self.assertTrue(report["source_clean"])
+        self.assertTrue(report["baseline"]["passed"], report)
+        self.assertEqual(report["baseline"]["summary"]["executed"], 8)
+        self.assertEqual(report["baseline"]["summary"]["failures"], 0)
+        self.assertEqual(report["baseline"]["summary"]["errors"], 0)
+
+        # Security check remains intact: a shallow source repo must still be refused.
+        (repo / "SHALLOW_PROBE.txt").write_text("second commit\n")
+        self.git(repo, "add", "SHALLOW_PROBE.txt")
+        self.git(repo, "commit", "-q", "-m", "second commit for shallow clone check")
+        shallow = self.root / "maestro-shallow"
+        self.git(self.root, "clone", "--quiet", "--depth", "1", repo.as_uri(), str(shallow))
+        self.assertTrue((shallow / ".git" / "shallow").exists())
+        shallow_base = self.git(shallow, "rev-parse", "HEAD").decode("ascii").strip()
+        with self.assertRaisesRegex(PolicyError, "unsupported clone metadata: shallow"):
+            trusted.check(shallow, shallow_base, verify)
+
+    def test_02_trusted_check_reports_dirty_tree_and_subprocess_denial_hints(self):
+        repo = self.root / "subproc-repo"
+        base = fixture.make_fixture(repo)
+
+        # Clean baseline passes with source_clean=True and no hints.
+        clean_report = trusted.check(repo, base)
+        self.assertTrue(clean_report["compatible"])
+        self.assertTrue(clean_report["source_clean"])
+        self.assertEqual(clean_report["source_clean_scope"], "working_tree_vs_source_head_excluding_gitignored")
+        self.assertFalse(clean_report["baseline"]["passed"])  # calc.add is stubbed in base fixture
+        self.assertNotIn("hints", clean_report)
+
+        # Dirty working tree (non-ignored untracked file) is flagged without failing compatibility.
+        (repo / "UNTRACKED_NOTE.txt").write_text("dirty\n")
+        dirty_report = trusted.check(repo, base)
+        self.assertFalse(dirty_report["source_clean"])
+        self.assertTrue(any("uncommitted or non-ignored untracked changes" in h for h in dirty_report.get("hints", [])))
+        self.assertIn("not a definitive diagnosis", dirty_report.get("hints_note", ""))
+        (repo / "UNTRACKED_NOTE.txt").unlink()
+
+        # Commit a .gitignore and verify gitignored files leave source_clean=True.
+        (repo / ".gitignore").write_text("ignored.tmp\n")
+        self.git(repo, "add", ".gitignore")
+        self.git(repo, "commit", "-q", "-m", "add gitignore")
+        ignored_base = self.git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+        (repo / "ignored.tmp").write_text("ignored scratch\n")
+        ignored_report = trusted.check(repo, ignored_base)
+        self.assertTrue(ignored_report["source_clean"])
+        (repo / "ignored.tmp").unlink()
+
+        # Commit a test that invokes subprocess.run -> Seatbelt denies it and hints note possible cause.
+        (repo / "tests" / "test_subproc.py").write_text(
+            "import subprocess, unittest\n"
+            "class SubprocTest(unittest.TestCase):\n"
+            "    def test_spawn(self):\n"
+            "        subprocess.run(['/usr/bin/true'], check=True)\n"
+        )
+        self.git(repo, "add", "tests/test_subproc.py")
+        self.git(repo, "commit", "-m", "add subprocess test")
+        subproc_base = self.git(repo, "rev-parse", "HEAD").decode("ascii").strip()
+
+        subproc_report = trusted.check(
+            repo, subproc_base, trusted.verify_config(test_dir="tests", pattern="test_subproc.py"),
+        )
+        self.assertTrue(subproc_report["compatible"])
+        self.assertFalse(subproc_report["baseline"]["passed"])
+        self.assertTrue(any(h.startswith("Possible cause:") and "subprocess" in h
+                            for h in subproc_report.get("hints", [])), subproc_report)
+        self.assertIn("not a definitive diagnosis", subproc_report.get("hints_note", ""))
+
+        # Unmatched pattern triggers zero-tests possible-cause hint.
+        empty_report = trusted.check(
+            repo, subproc_base, trusted.verify_config(test_dir="tests", pattern="test_nonexistent_*.py"),
+        )
+        self.assertTrue(empty_report["compatible"])
+        self.assertFalse(empty_report["baseline"]["passed"])
+        self.assertTrue(any(h.startswith("Possible cause:") and "--test-dir" in h
+                            for h in empty_report.get("hints", [])), empty_report)
+
+    def test_03_offline_end_to_end_dogfooding_workflow_produces_applicable_patch(self):
+        repo = self.root / "workflow-repo"
+        base = fixture.make_fixture(repo)
+        self.assertTrue(trusted.check(repo, base)["source_clean"])
+
+        store = Store(self.root / "state")
+        engine = trusted.TrustedEngine(store, test_context=True)
+        task_file = self.root / "TASK.md"
+        task_file.write_text((repo / "TASK.md").read_text() + "\nreview-scenario: pass\n")
+
+        started = engine.start(repo, base, task_file, "test-model", review_model="test-reviewer",
+                               review_context="scoped")
+        task_id = started["id"]
+        self.assertEqual(started["status"], "preparing")
+        self.assertEqual(engine.implement(task_id, str(FAKE_CODEX))["status"], "reviewing")
+        self.assertEqual(engine.verify(task_id)["status"], "awaiting_approval")
+        rev = engine.review(task_id, str(FAKE_CLAUDE))["review"]
+        self.assertEqual(rev["outcome"], "completed")
+        self.assertFalse(rev["blocking"])
+        self.assertIn("not a full-repository review", rev["scope_notice"])
+
+        patch_bytes = engine.diff(task_id)
+        self.assertIn(b"calc.py", patch_bytes)
+
+        sha = store.get(task_id)["evidence"]["snapshot_sha256"]
+        self.assertEqual(engine.approve(task_id, sha, "Offline dogfooder")["status"], "approved")
+        exported = engine.export(task_id)
+
+        # Verify exported patch applies cleanly on a fresh clone of base and passes tests.
+        fresh = self.root / "fresh-apply"
+        self.git(self.root, "clone", "--no-hardlinks", "--template=", str(repo), str(fresh))
+        self.git(fresh, "checkout", "--detach", base)
+        self.git(fresh, "apply", "--check", exported["path"])
+        self.git(fresh, "apply", exported["path"])
+        res = subprocess.run(
+            ["/usr/bin/python3", "-B", "-m", "unittest", "discover", "-s", "tests"],
+            cwd=str(fresh), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
