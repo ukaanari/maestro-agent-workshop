@@ -211,7 +211,12 @@ A separately authorized real Codex run uses the same commands without `--codex-b
 ```
 
 `status` lists the changed files and the `next` suggested commands, and `diff` prints the
-exact tree-to-tree patch under review, without changing task state. Instead of approving, a human can run
+exact tree-to-tree patch under review, without changing task state. `trusted list [--status STATUS]`
+and `trusted report TASK_ID [--format json|markdown] [--no-live-check]` inspect existing
+Trusted Local records strictly read-only (single-transaction SQLite `?mode=ro` snapshot, zero
+writes to clones, Git object stores, indexes, or state directories), mirror real approval/export
+gate preconditions read-only, escape untrusted fields in Markdown output, and omit `approve`/`export`
+suggestions whenever evidence is missing, invalid, or drifted. Instead of approving, a human can run
 `trusted reject TASK_ID --founder NAME --reason TEXT` (recorded, terminal `rejected`)
 or `trusted cancel TASK_ID`. Both permanently block approval and export.
 
@@ -692,7 +697,7 @@ value is an audit label typed by the operator, not authentication.
 
 ## How it works
 
-Ten small Python modules (standard library only):
+Eleven small Python modules (standard library only):
 
 | Module | Responsibility |
 |---|---|
@@ -706,6 +711,7 @@ Ten small Python modules (standard library only):
 | `agents.py` | Versioned IPC envelopes, disabled real adapters, deterministic fake worker |
 | `trusted.py` | Trusted Local mode: isolated clone, Codex CLI launch, snapshots, verification layouts, `check`, approval and export gates |
 | `reviewer.py` | Trusted Local Claude Code reviewer: fixed invocation without built-in tools, review input, review schema and strict output validation |
+| `report.py` | Read-only Trusted Local task listing and sanitized JSON/Markdown reporting |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the lifecycle, trust boundaries and
 evidence chain, and [P1A-SECURITY.md](P1A-SECURITY.md) for the confinement design, what
